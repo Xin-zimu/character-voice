@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 Xin-zimu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+关于同人内容与语料的说明
+
+本仓库的代码以 MIT 许可证发布。
+
+但《凉宫春日的忧郁》《凉宫春日的消失》及其角色（包括长门有希）的著作权
+归原作者谷川流、插画师伊东杂音及角川书店等相关权利方所有。本仓库与上述
+权利方无任何关联，也未获其授权或认可。
+
+本仓库**不包含**动画字幕原文。data/parsed、data/index、data/scenes 与
+data/_deprecated 均通过 .gitignore 排除。使用者如需检索功能，应自行准备
+合法来源的字幕文件。
+
+仓库中的人格卡示例、提示词等均为按角色规则手写的内容，不复制原作台词。
+如权利方认为本仓库有不妥之处，请通过 issue 联系，我会配合调整或移除。

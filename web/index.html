@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YUKI.N&gt;</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root{
+    --bg:#0d1015; --panel:#141820; --line:#222a36;
+    --text:#c6d0dc; --dim:#6b7889; --accent:#7fb2c4;
+    --user:#1b222c;
+    --serif:"Songti SC","Noto Serif CJK SC",Georgia,"Times New Roman",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Cascadia Mono",monospace;
+    --rail:#7fb2c4;
+    --glow:0 0 14px rgba(127,178,196,.28);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--sans);
+    display:flex; justify-content:center; overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+    transition:background .8s ease,color .8s ease;
+  }
+  /* 极淡的扫描线。不晃眼，只是让屏幕"有厚度" */
+  body::after{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:60;
+    background:repeating-linear-gradient(to bottom,rgba(255,255,255,.014) 0 1px,transparent 1px 3px);
+    opacity:.7; mix-blend-mode:screen;
+  }
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:59;
+    background:radial-gradient(ellipse at 50% 0%,rgba(127,178,196,.055),transparent 62%);
+    transition:background .8s;
+  }
+
+  .app{width:100%;max-width:880px;height:100%;display:flex;flex-direction:column;padding:0 30px}
+
+  /* ---------------- 顶栏 ---------------- */
+  header{
+    padding:22px 0 0; border-bottom:1px solid var(--line);
+    display:flex; flex-direction:column; gap:0; transition:border-color .8s;
+  }
+  .top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}
+  .brand{display:flex;flex-direction:column;gap:6px}
+  .brand .name{
+    font-family:var(--mono); font-size:13px; letter-spacing:.22em; color:var(--text);
+    display:flex; align-items:center; gap:9px;
+  }
+  .brand .name .dot{
+    width:6px;height:6px;border-radius:50%;background:var(--accent);
+    box-shadow:var(--glow); animation:pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1)}}
+  .brand .sub{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.1em}
+  .brand .sub b{color:var(--accent);font-weight:500}
+
+  .controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+  .btn{
+    background:transparent;border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+    padding:6px 11px;border-radius:2px;cursor:pointer;transition:all .22s;white-space:nowrap;
+  }
+  .btn:hover{color:var(--text);border-color:var(--dim)}
+  .btn.on{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+  .icon-btn{width:30px;height:29px;padding:0;font-size:13px}
+
+  /* ---------------- 世界条 ---------------- */
+  .worldbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:13px 0 14px; gap:14px;
+  }
+  .tabs{display:flex;gap:0;border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .tabs button{
+    background:transparent;border:none;border-right:1px solid var(--line);
+    color:var(--dim);font-family:var(--mono);font-size:11px;letter-spacing:.06em;
+    padding:8px 15px;cursor:pointer;transition:all .22s;display:flex;gap:8px;align-items:center;
+  }
+  .tabs button:last-child{border-right:none}
+  .tabs button:hover{color:var(--text)}
+  .tabs button.on{background:var(--accent);color:var(--bg)}
+  .tabs button .en{font-size:9px;opacity:.7;letter-spacing:.12em}
+  .tabs button.on .en{opacity:.85}
+  .wdesc{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.04em;text-align:right;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---------------- 主区 ---------------- */
+  main{
+    flex:1;overflow-y:auto;padding:26px 0 18px;
+    scrollbar-width:thin;scrollbar-color:var(--line) transparent;
+  }
+  main::-webkit-scrollbar{width:5px}
+  main::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+
+  .msg{margin-bottom:24px;animation:rise .4s cubic-bezier(.2,.7,.3,1)}
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  /* 终端行：YUKI.N> 前缀 + 正文 */
+  .msg.yuki{display:flex;gap:14px}
+  .msg.yuki .rail{width:1px;background:var(--rail);opacity:.4;flex:none;border-radius:1px;transition:background .8s}
+  .msg.yuki .body{flex:1;min-width:0}
+  .line{display:flex;align-items:baseline;gap:0;font-family:var(--mono);font-size:14.5px;line-height:1.95}
+  .line .pre{color:var(--accent);flex:none;letter-spacing:.02em;margin-right:.55em}
+  .line .txt{
+    color:var(--text);white-space:pre-wrap;word-break:break-word;letter-spacing:.04em;
+    text-shadow:0 0 20px rgba(127,178,196,.13);
+  }
+  .line .caret{color:var(--accent);animation:blink 1.05s steps(2) infinite;margin-left:1px;font-size:12px}
+  @keyframes blink{50%{opacity:0}}
+
+  .meta{
+    margin-top:7px;font-family:var(--mono);font-size:10px;color:var(--dim);
+    letter-spacing:.05em;display:flex;gap:11px;align-items:center;flex-wrap:wrap;opacity:.8;
+  }
+  .meta .warn{color:#c47a5a}
+  .meta .tagx{color:var(--dim);opacity:.75}
+  .meta button{
+    background:none;border:none;color:var(--dim);font-family:var(--mono);font-size:10px;
+    cursor:pointer;letter-spacing:.05em;padding:0;border-bottom:1px dashed var(--line);
+  }
+  .meta button:hover{color:var(--accent);border-color:var(--accent)}
+
+  /* 用户行 */
+  .msg.user{display:flex;justify-content:flex-end}
+  .msg.user .text{
+    background:var(--user);padding:10px 15px;font-family:var(--mono);font-size:13px;
+    line-height:1.75;max-width:80%;border-radius:2px;white-space:pre-wrap;word-break:break-word;
+    color:var(--text);border-left:2px solid var(--line);transition:background .8s;
+  }
+
+  /* 系统消息：世界切换 */
+  .sys{
+    margin:26px 0;font-family:var(--mono);font-size:10.5px;color:var(--dim);
+    letter-spacing:.08em;display:flex;flex-direction:column;gap:5px;
+    border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);
+    padding:11px 0;animation:rise .5s ease;
+  }
+  .sys .ok{color:var(--accent)}
+  .sys .warnline{color:#c47a5a}
+
+  /* 空状态 */
+  .empty{height:100%;display:flex;flex-direction:column;justify-content:center;gap:10px;padding-bottom:70px}
+  .empty .l{font-family:var(--mono);font-size:12.5px;color:var(--dim);line-height:2.1;letter-spacing:.05em}
+  .empty .l .pre{color:var(--accent);opacity:.85}
+  .empty .hint{font-family:var(--mono);font-size:10px;color:var(--line);letter-spacing:.1em;margin-top:14px}
+  .empty .hint.link{color:var(--accent);opacity:.7;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+  .empty .hint.link:hover{opacity:1}
+
+  /* ---------------- 输入 ---------------- */
+  footer{padding:12px 0 20px;border-top:1px solid var(--line);transition:border-color .8s}
+  .input-row{display:flex;gap:9px;align-items:flex-end}
+  .prefix{
+    font-family:var(--mono);font-size:12px;color:var(--accent);opacity:.8;
+    padding-bottom:13px;flex:none;letter-spacing:.02em;
+  }
+  textarea{
+    flex:1; min-width:0;background:var(--panel);border:1px solid var(--line);color:var(--text);
+    font-family:var(--mono);font-size:13px;line-height:1.7;padding:10px 13px;border-radius:2px;overflow-y:auto;resize:none;outline:none;max-height:150px;min-height:42px;
+    transition:border-color .25s,background .8s;
+  }
+  textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(127,178,196,.05)}
+  textarea::placeholder{color:var(--dim);opacity:.6}
+  #send{
+    background:var(--accent);color:var(--bg);border:none;padding:0 18px;height:42px;
+    border-radius:2px;cursor:pointer;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+    transition:opacity .2s;flex:none;
+  }
+  #send:hover{opacity:.85}
+  #send:disabled{opacity:.3;cursor:not-allowed}
+  .footnote{
+    margin-top:8px;font-family:var(--mono);font-size:10px;color:var(--line);
+    letter-spacing:.05em;display:flex;justify-content:space-between;gap:10px;
+  }
+  .footnote .r{cursor:pointer;display:flex;gap:10px}
+  .footnote .r span:hover{color:var(--dim)}
+
+  /* ---------------- 浮层 ---------------- */
+  .mask{
+    position:fixed;inset:0;background:rgba(5,7,10,.72);backdrop-filter:blur(4px);
+    display:flex;align-items:center;justify-content:center;z-index:70;padding:20px;
+  }
+  .mask.hidden{display:none}
+  .sheet{
+    background:var(--panel);border:1px solid var(--line);border-radius:3px;
+    width:min(560px,94vw);max-height:86vh;display:flex;flex-direction:column;
+  }
+  .sheet .head{
+    padding:16px 20px 13px;border-bottom:1px solid var(--line);
+    display:flex;justify-content:space-between;align-items:center;gap:12px;
+  }
+  .sheet .head h2{font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.16em;color:var(--text)}
+  .sheet .head .x{
+    background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer;line-height:1;padding:2px 4px;
+  }
+  .sheet .head .x:hover{color:var(--text)}
+  .sheet .bodyx{padding:17px 20px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+  .sheet .bodyx::-webkit-scrollbar{width:5px}
+  .sheet .bodyx::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  .sheet .foot{padding:13px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}
+
+  .note{font-family:var(--mono);font-size:10.5px;color:var(--dim);line-height:1.9;margin-bottom:15px;letter-spacing:.02em}
+  .presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+  .presets button{
+    background:var(--bg);border:1px solid var(--line);color:var(--dim);font-family:var(--mono);
+    font-size:10.5px;padding:5px 10px;border-radius:2px;cursor:pointer;transition:all .2s;
+  }
+  .presets button:hover{color:var(--accent);border-color:var(--accent)}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-family:var(--mono);font-size:9.5px;color:var(--dim);letter-spacing:.12em;margin-bottom:5px}
+  .field input{
+    width:100%;background:var(--bg);border:1px solid var(--line);color:var(--text);
+    padding:8px 10px;font-size:12px;border-radius:2px;outline:none;font-family:var(--mono);
+  }
+  .field input:focus{border-color:var(--accent)}
+
+  /* 资料终端 */
+  .corpus-list{display:flex;flex-direction:column;gap:1px}
+  .corpus-list .ep{
+    display:flex;justify-content:space-between;gap:12px;padding:7px 9px;cursor:pointer;
+    font-family:var(--mono);font-size:11.5px;color:var(--text);border-radius:2px;transition:background .15s;
+  }
+  .corpus-list .ep:hover{background:var(--bg)}
+  .corpus-list .ep .n{color:var(--dim);font-size:10px}
+  .corpus-list .ep .t{color:var(--dim);font-size:10px;white-space:nowrap}
+  .corpus-list .ep.crash .n{color:#b98a6a}
+
+  .cx-head{display:flex;align-items:center;gap:10px;margin-bottom:11px;flex-wrap:wrap}
+  .cx-head .back{font-family:var(--mono);font-size:10.5px;color:var(--dim);cursor:pointer;border-bottom:1px dashed var(--line)}
+  .cx-head .back:hover{color:var(--accent)}
+  .cx-head .ttl{font-family:var(--mono);font-size:11.5px;color:var(--text);letter-spacing:.06em}
+  .cx-head .rg{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--dim)}
+  .cx-line{
+    display:flex;gap:11px;padding:4px 6px;border-radius:2px;font-family:var(--mono);font-size:11.5px;
+    line-height:1.7;border-left:2px solid transparent;
+  }
+  .cx-line .ts{color:var(--dim);flex:none;font-size:10px;padding-top:2px;letter-spacing:.02em}
+  .cx-line .tx{color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .cx-line.anchor{background:rgba(127,178,196,.05);border-left-color:var(--accent)}
+  .cx-line.anchor .tx{color:#dbe6f0}
+  .cx-line.crash .ts{color:#a97a5c}
+  .cx-more{
+    margin-top:12px;font-family:var(--mono);font-size:10.5px;color:var(--accent);cursor:pointer;
+    text-align:center;padding:8px;border:1px dashed var(--line);border-radius:2px;
+  }
+  .cx-more:hover{border-color:var(--accent)}
+
+  /* 校对面板 */
+  pre.prompt{
+    font-family:var(--mono);font-size:10.5px;line-height:1.75;color:var(--text);
+    white-space:pre-wrap;word-break:break-word;letter-spacing:.01em;
+  }
+  pre.prompt .h{color:var(--accent)}
+  .hits{margin-top:15px;border-top:1px solid var(--line);padding-top:13px}
+  .hits .t{font-family:var(--mono);font-size:9.5px;color:var(--dim);letter-spacing:.12em;margin-bottom:8px}
+  .hit{font-family:var(--mono);font-size:10.5px;line-height:1.7;color:var(--dim);margin-bottom:7px;padding-left:9px;border-left:1px solid var(--line)}
+  .hit b{color:var(--accent);font-weight:400}
+  .hit .cr{color:#b98a6a}
+
+  @media (max-width:600px){
+    .app{padding:0 15px}
+    .line{font-size:13.5px}
+    .wdesc{display:none}
+    header{padding-top:16px}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="top">
+      <div class="brand">
+        <div class="name"><span class="dot"></span><span id="p-name">YUKI.N&gt;</span></div>
+        <div class="sub" id="p-sub">信息统合思念体 · 人形终端界面</div>
+      </div>
+      <div class="controls">
+        <button class="btn icon-btn" id="open-corpus" title="资料终端：翻原作原文">▤</button>
+        <button class="btn icon-btn" id="open-preflight" title="校对：这次实际发出去的 prompt">◇</button>
+        <button class="btn icon-btn" id="open-settings" title="接口设置">⚙</button>
+        <button class="btn icon-btn" id="clear" title="断开这次连接">×</button>
+      </div>
+    </div>
+    <div class="worldbar">
+      <div class="tabs" id="tabs"></div>
+      <div class="wdesc" id="wdesc"></div>
+    </div>
+  </header>
+
+  <main id="chat"></main>
+
+  <footer>
+    <div class="input-row">
+      <span class="prefix">YOU&gt;</span>
+      <textarea id="input" rows="1" placeholder="……"></textarea>
+      <button id="send">发送</button>
+    </div>
+    <div class="footnote">
+      <span>Enter 发送 · Shift+Enter 换行</span>
+      <span class="r">
+        <span id="stat">—</span>
+        <span id="model-tag">未配置模型</span>
+      </span>
+    </div>
+  </footer>
+</div>
+
+<!-- 设置 -->
+<div class="mask hidden" id="settings">
+  <div class="sheet">
+    <div class="head"><h2>接口设置</h2><button class="x" data-close="settings">×</button></div>
+    <div class="bodyx">
+      <p class="note">
+        填你自己的 API Key。它只保存在这台电脑的浏览器里，不会上传，也不会写进这个目录。<br>
+        任何 OpenAI 兼容接口都可以。
+      </p>
+      <div class="field">
+        <label>后端</label>
+        <select id="s-backend" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px 10px;font-family:inherit;font-size:13px">
+          <option value="">自定义接口（下面的 BASE URL / KEY）</option>
+        </select>
+        <div class="note" id="s-backend-note" style="margin-top:6px"></div>
+      </div>
+      <div id="s-custom">
+        <div class="presets" id="presets">
+          <button data-b="https://api.deepseek.com/v1" data-m="deepseek-chat">DeepSeek</button>
+          <button data-b="https://dashscope.aliyuncs.com/compatible-mode/v1" data-m="qwen-plus">阿里百炼</button>
+          <button data-b="https://api.siliconflow.cn/v1" data-m="Qwen/Qwen2.5-72B-Instruct">硅基流动</button>
+          <button data-b="http://localhost:11434/v1" data-m="qwen2.5:7b">本地 Ollama</button>
+        </div>
+        <div class="field"><label>BASE URL</label><input id="s-base" placeholder="https://api.deepseek.com/v1"></div>
+        <div class="field"><label>API KEY</label><input id="s-key" type="password" placeholder="sk-..."></div>
+      </div>
+      <div class="field"><label>模型</label>
+        <!-- 有可选后端时用真正的下拉（能点开选）；自填接口时用文本框输入 -->
+        <select id="s-model-select" class="hidden" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px 10px;font-family:inherit;font-size:13px"></select>
+        <input id="s-model" placeholder="deepseek-chat">
+        <div class="note" id="s-model-note" style="margin-top:6px"></div>
+      </div>
+      <div class="field"><label>温度（越高越不稳，长门建议 0.7–0.9）</label><input id="s-temp" placeholder="0.85"></div>
+    </div>
+    <div class="foot">
+      <button class="btn" data-close="settings">取消</button>
+      <button class="btn on" id="save-settings">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 资料终端 -->
+<div class="mask hidden" id="corpus">
+  <div class="sheet">
+    <div class="head">
+      <h2 id="cx-title">资料终端</h2>
+      <button class="x" data-close="corpus">×</button>
+    </div>
+    <div class="bodyx" id="cx-body"></div>
+  </div>
+</div>
+
+<!-- 校对 -->
+<div class="mask hidden" id="preflight">
+  <div class="sheet">
+    <div class="head"><h2>PREFLIGHT · 这次会发出去什么</h2><button class="x" data-close="preflight">×</button></div>
+    <div class="bodyx" id="pf-body"><span class="note">先输入一句话，再点这里。</span></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = s => document.querySelector(s);
+  const chatEl = $("#chat"), inputEl = $("#input"), sendBtn = $("#send");
+
+  const LS_SET   = "yuki.settings.v2";
+  const LS_WORLD = "yuki.world.v2";
+  const LS_HIST  = w => `yuki.hist.v2.${w}`;
+  const MAX_PERSIST = 200;
+  const loadedWorlds = new Set();
+
+  let worlds = null;          // /api/worlds 返回的 worlds
+  let corpusMeta = null;      // 语料统计
+  let personas = {};          // id -> card
+  let backends = [];          // /api/backends 返回的可选后端
+  let world = "normal";
+  let hist = { normal: [], crash: [] };   // 每条 {role, content, chars, warn}
+  let busy = false;
+  let settings = { backend:"", base_url:"", api_key:"", model:"", temperature:"0.85" };
+
+  /* ================= 持久化 ================= */
+  function loadSettings(){
+    try{ settings = {...settings, ...JSON.parse(localStorage.getItem(LS_SET) || "{}")}; }catch(e){}
+    paintSettings();
+  }
+  function paintSettings(){
+    const b = backends.find(x => x.id === settings.backend);
+    $("#model-tag").textContent = settings.model ||
+      (b && b.models && b.models.length ? b.models[0] : (b ? b.name : "未配置模型"));
+  }
+  function saveSettings(){
+    try{ localStorage.setItem(LS_SET, JSON.stringify(settings)); }catch(e){}
+    paintSettings();
+  }
+  function loadHist(w){
+    if(loadedWorlds.has(w)) return;
+    loadedWorlds.add(w);
+    try{
+      const raw = JSON.parse(localStorage.getItem(LS_HIST(w)) || "[]");
+      hist[w] = Array.isArray(raw) ? raw.filter(m => m && typeof m.content === "string" &&
+        (m.role === "user" || m.role === "assistant")).slice(-MAX_PERSIST) : [];
+    }catch(e){ hist[w] = []; }
+  }
+  function saveHist(w = world){
+    // 单独兜住: 写满配额不能把已经拿到的回复吃掉
+    try{
+      const slim = hist[w]
+        .filter(m => m.role === "user" || m.role === "assistant")
+        .slice(-MAX_PERSIST)
+        .map(m => ({role:m.role, content:m.content, chars:m.chars, warn:m.warn}));
+      localStorage.setItem(LS_HIST(w), JSON.stringify(slim));
+    }catch(e){
+      systemLine([["warnline", "记录写入失败：本地存储已满。连接内容仍在屏幕上，但刷新后会丢。"]]);
+    }
+  }
+
+  /* ================= 主题 ================= */
+  function applyTheme(){
+    const p = currentPersona();
+    if(!p) return;
+    const t = p.theme || {};
+    const r = document.documentElement.style;
+    const map = {bg:"--bg", panel:"--panel", line:"--line", text:"--text",
+                 dim:"--dim", accent:"--accent", bubble_user:"--user"};
+    for(const [k, v] of Object.entries(map)) if(t[k]) r.setProperty(v, t[k]);
+    r.setProperty("--rail", t.accent || "#7fb2c4");
+    $("#p-name").textContent = (p.protocol && p.protocol.prefix) || "YUKI.N>";
+    $("#p-sub").textContent  = p.subtitle || "";
+    document.title = (p.protocol && p.protocol.prefix) || "YUKI.N>";
+    const wm = worlds && worlds[world];
+    $("#wdesc").textContent = wm ? wm.desc : "";
+    inputEl.placeholder = world === "crash" ? "那个……你想说什么" : "……";
+  }
+
+  function currentPersona(){
+    const wm = worlds && worlds[world];
+    const id = wm ? wm.persona : "yuki";
+    return personas[id] || personas[Object.keys(personas)[0]] || null;
+  }
+
+  /* ================= 渲染 ================= */
+  const isSys = m => m && m.sys;
+
+  function visible(m){
+    return m && (m.role === "user" || m.role === "assistant" || m.sys);
+  }
+
+  function renderAll(){
+    chatEl.innerHTML = "";
+    const msgs = hist[world].filter(visible);
+    if(!msgs.length){ renderEmpty(); paintStat(); return; }
+    hist[world].forEach((m, i) => {
+      if(visible(m)) chatEl.appendChild(m.sys ? buildSys(m) : buildMsg(m, i));
+    });
+    scrollDown();
+    paintStat();
+  }
+
+  function renderEmpty(){
+    const p = currentPersona();
+    const prefix = (p && p.protocol && p.protocol.prefix) || "YUKI.N>";
+    // 开场白不能像「重新建立连接」——你们本来就认识（CHAT-001）。
+    // 这里只给一个在场的感觉，不宣布关系、不走开场剧情。
+    const lines = world === "normal"
+      ? ["在。", "有事就说。"]
+      : ["……啊。", "我在这里。"];
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.innerHTML = lines.map(l =>
+      `<div class="l"><span class="pre">${escapeHtml(prefix)}</span> ${escapeHtml(l)}</div>`).join("");
+
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    const readyBackend = backends.find(b => b.id === settings.backend) ||
+                         backends.find(b => b.available);
+    if(!settings.api_key && !settings.backend && !readyBackend){
+      hint.textContent = "尚未配置接口 · 点这里填入 API Key";
+      hint.classList.add("link");
+      hint.onclick = openSettings;
+    }else{
+      hint.textContent = world === "normal"
+        ? "SHE SPEAKS ONLY WHEN NECESSARY"
+        : "THE OTHER LINE · 同一个她，另一条时间线";
+    }
+    div.appendChild(hint);
+
+    if(corpusMeta){
+      const c = document.createElement("div");
+      c.className = "hint";
+      // 语料不入库（版权原因）。没建索引时说清楚，不要显示「0 条」让人以为坏了。
+      c.textContent = corpusMeta.lines
+        ? `原作记录 ${corpusMeta.lines} 条 · ${corpusMeta.episodes.length} 个片源`
+        : "没有原作记录 · 先放好 data/parsed 字幕并运行 py build_corpus.py";
+      div.appendChild(c);
+    }
+    chatEl.appendChild(div);
+  }
+
+  function buildMsg(m, idx){
+    const p = currentPersona();
+    const prefix = (p && p.protocol && p.protocol.prefix) || "YUKI.N>";
+    if(m.role === "user"){
+      const wrap = document.createElement("div");
+      wrap.className = "msg user";
+      const t = document.createElement("div");
+      t.className = "text";
+      t.textContent = m.content;
+      wrap.appendChild(t);
+      return wrap;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "msg yuki";
+    wrap.innerHTML = `
+      <div class="rail"></div>
+      <div class="body">
+        <div class="line"><span class="pre"></span><span class="txt"></span></div>
+        <div class="meta">
+          <span class="count"></span>
+          <span class="flag"></span>
+          <button class="regen">重说</button>
+        </div>
+      </div>`;
+    wrap.querySelector(".pre").textContent = prefix;
+    wrap.querySelector(".txt").textContent = m.content;
+    applyMeta(wrap, m);
+    wrap.querySelector(".regen").onclick = () => regenerate(idx);
+    return wrap;
+  }
+
+  function buildSys(m){
+    const d = document.createElement("div");
+    d.className = "sys";
+    (m.lines || []).forEach(([cls, txt]) => {
+      const s = document.createElement("span");
+      s.className = cls || "";
+      s.textContent = txt;
+      d.appendChild(s);
+    });
+    return d;
+  }
+
+  function systemLine(lines){
+    hist[world].push({sys:true, lines});
+    chatEl.querySelector(".empty")?.remove();
+    chatEl.appendChild(buildSys({sys:true, lines}));
+    scrollDown();
+  }
+
+  function applyMeta(node, m){
+    const chars = (m.content || "").replace(/\s/g, "").length;
+    node.querySelector(".count").textContent = chars + " 字";
+    const flag = node.querySelector(".flag");
+    if(m.warn){
+      flag.textContent = "△ " + m.warn;
+      flag.className = "flag warn";
+    }else{
+      flag.textContent = "";
+      flag.className = "flag";
+    }
+  }
+
+  function paintStat(){
+    const ai = hist[world].filter(m => m.role === "assistant");
+    const st = $("#stat");
+    if(!ai.length){ st.textContent = "—"; return; }
+    const total = ai.reduce((s, m) => s + (m.content || "").replace(/\s/g, "").length, 0);
+    st.textContent = `本轮 ${total} 字 · 平均 ${(total / ai.length).toFixed(1)} 字/句`;
+  }
+
+  function scrollDown(){ chatEl.scrollTop = chatEl.scrollHeight; }
+
+  /* ================= 发送 ================= */
+  function historyForApi(w = world){
+    // 服务端统一保留最近 12 轮；这里排除协议消息和空占位。
+    return hist[w]
+      .filter(m => m.role === "user" || m.role === "assistant")
+      .filter(m => m.content && m.content.trim())
+      .map(m => ({role:m.role, content:m.content}));
+  }
+
+  function createTypewriter(txtEl, caret, persona){
+    const configured = Number(persona?.protocol?.type_delay_ms ?? 42);
+    const delay = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+      ? 0 : (Number.isFinite(configured) ? Math.max(0, configured) : 42);
+    let target = [], shown = 0, timer = null, finished = false, resolveDone;
+    const done = new Promise(resolve => { resolveDone = resolve; });
+    function tick(){
+      timer = null;
+      shown = delay === 0 ? target.length : Math.min(shown + 1, target.length);
+      txtEl.textContent = target.slice(0, shown).join("");
+      txtEl.appendChild(caret);
+      scrollDown();
+      schedule();
+    }
+    function schedule(){
+      if(shown < target.length && timer === null) timer = setTimeout(tick, delay);
+      else if(finished && shown === target.length) resolveDone();
+    }
+    return {
+      update(raw, final = false){
+        // 模型误写的协议前缀可能跨 token 到达，确认前先不显示。
+        const probe = raw.trimStart().replace(/\s/g, "").toUpperCase();
+        const text = !final && probe && "YUKI.N>".startsWith(probe) ? "" : stripPrefix(raw);
+        target = Array.from(text); // 不在 emoji 的 UTF-16 代理对中间断字。
+        schedule();
+      },
+      finish(){ finished = true; schedule(); return done; }
+    };
+  }
+
+  async function send(){
+    const text = inputEl.value.trim();
+    if(!text || busy) return;
+    // 只要能说话就发：自己的 Key，或任何一个可用后端。
+    const anyBackend = backends.find(b => b.available);
+    if(!settings.api_key && !settings.backend && !anyBackend){ openSettings(); return; }
+    if(!settings.backend && !settings.api_key && anyBackend){ settings.backend = anyBackend.id; }
+
+    const w = world;
+    const requestHistory = historyForApi(w);
+    const persona = currentPersona();
+    busy = true; sendBtn.disabled = true;
+    document.querySelectorAll("#tabs button").forEach(b => { b.disabled = true; });
+    $("#clear").disabled = true;
+    inputEl.value = ""; inputEl.style.height = "auto";
+
+    chatEl.querySelector(".empty")?.remove();
+    const userMsg = {role:"user", content:text};
+    hist[w].push(userMsg);
+    chatEl.appendChild(buildMsg(userMsg, hist[w].length - 1));
+
+    const placeholder = {role:"assistant", content:"", chars:0, warn:""};
+    hist[w].push(placeholder);
+    const node = buildMsg(placeholder, hist[w].length - 1);
+    const txtEl = node.querySelector(".txt");
+    const caret = document.createElement("span");
+    caret.className = "caret"; caret.textContent = "▍";
+    txtEl.appendChild(caret);
+    chatEl.appendChild(node);
+    scrollDown();
+
+    let acc = "";
+    const typer = createTypewriter(txtEl, caret, persona);
+    try{
+      const useBackend = settings.backend || "";
+      const payload = {
+        world: w,
+        message: text,
+        history: requestHistory,
+        temperature: parseFloat(settings.temperature) || 0.85,
+        max_tokens: w === "normal" ? 220 : 320,
+        k: 5
+      };
+      if(useBackend){
+        // 可选后端：地址与 token 由服务端解析，前端只报 id 和模型名。
+        payload.backend = useBackend;
+        payload.model = settings.model || "";
+      }else{
+        payload.base_url = settings.base_url || "https://api.deepseek.com/v1";
+        payload.api_key = settings.api_key;
+        payload.model = settings.model || "deepseek-chat";
+      }
+      const resp = await fetch("/api/chat", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(payload)
+      });
+
+      if(!resp.ok){
+        let msg = "请求失败";
+        try{ msg = (await resp.json()).error || msg; }catch(e){}
+        throw new Error(msg);
+      }
+
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let completed = false, sawDone = false;
+      let thinking = false;
+      // 推理模型会先吐一大段 reasoning_content。它不进入正文，
+      // 所以要给个可见提示，否则界面停在「0 字」看起来像卡死。
+      function noteThinking(on){
+        if(on === thinking) return;
+        thinking = on;
+        if(on && !acc){
+          txtEl.textContent = "（思考中）";
+          txtEl.appendChild(caret);
+        }else if(!on){
+          txtEl.textContent = Array.from(stripPrefix(acc)).join("");
+          txtEl.appendChild(caret);
+        }
+      }
+      function consume(line){
+        const s = line.trim();
+        if(!s.startsWith("data:")) return;
+        const d = s.slice(5).trim();
+        if(d === "[DONE]"){ completed = true; sawDone = true; return; }
+        let event;
+        try{ event = JSON.parse(d); }catch(e){ return; }
+        if(event.error) throw new Error(event.error.message || "上游流中断");
+        const choice = event.choices?.[0];
+        if(choice?.finish_reason) completed = true;
+        if(choice?.delta?.reasoning_content) noteThinking(true);
+        const piece = choice?.delta?.content;
+        if(typeof piece === "string" && piece) noteThinking(false);
+        if(typeof piece === "string" && piece){
+          acc += piece;
+          typer.update(acc);
+        }
+      }
+      try{
+        while(!sawDone){
+          const {done, value} = await reader.read();
+          buf += done ? dec.decode() : dec.decode(value, {stream:true});
+          const lines = buf.split("\n");
+          buf = lines.pop();
+          for(const line of lines){ consume(line); if(sawDone) break; }
+          if(done){ if(buf && !sawDone) consume(buf); break; }
+        }
+        if(!completed) throw new Error("流未完整结束");
+      }finally{
+        try{ await reader.cancel(); }catch(e){}
+        reader.releaseLock();
+      }
+
+      placeholder.content = stripPrefix(acc.trim() || "……");
+      typer.update(placeholder.content, true);
+      await typer.finish();
+      txtEl.textContent = placeholder.content;
+      placeholder.warn = checkReply(placeholder.content);
+      applyMeta(node, placeholder);
+
+    }catch(err){
+      placeholder.content = stripPrefix(acc.trim()) || "……连接失败。";
+      typer.update(placeholder.content, true);
+      await typer.finish();
+      txtEl.textContent = placeholder.content;
+      placeholder.warn = acc.trim() ? "流中断" : String(err.message || err).slice(0, 60);
+      applyMeta(node, placeholder);
+    }finally{
+      busy = false; sendBtn.disabled = false; inputEl.focus();
+      document.querySelectorAll("#tabs button").forEach(b => { b.disabled = false; });
+      $("#clear").disabled = false;
+      paintStat();
+      // 存档独立于请求成败，配额异常不能覆盖已经收到的回复。
+      saveHist(w);
+    }
+  }
+
+  function stripPrefix(t){
+    return String(t).replace(/^\s*YUKI\.N\s*>\s*/i, "").trim();
+  }
+
+  /* ================= 违例检测 ================= */
+  function checkReply(text){
+    const p = currentPersona();
+    if(!p) return "";
+    const g = p.guard || {};
+    const probs = [];
+    (g.banned_patterns || []).forEach(pat => {
+      try{
+        const hit = text.match(new RegExp(pat, "i"));
+        if(hit){
+          const w = hit[0].replace(/[|()?]/g, "").slice(0, 8);
+          if(!probs.includes("「" + w + "」")) probs.push("「" + w + "」");
+        }
+      }catch(e){}
+    });
+    if(/\n\s*\n/.test(text)) probs.push("分段");
+    return probs.slice(0, 2).join(" ");
+  }
+
+  /* ================= 重说 ================= */
+  async function regenerate(idx){
+    if(busy) return;
+    const w = world;
+    const h = hist[w];
+    // 找到这条回复前面最近的一条用户消息
+    let ui = -1;
+    for(let i = idx - 1; i >= 0; i--){ if(h[i].role === "user"){ ui = i; break; } }
+    if(ui < 0) return;
+    const text = h[ui].content;
+    // 把「用户消息之后到这条回复」整段砍掉，把用户消息放回输入框再发一次
+    hist[w] = h.slice(0, ui);
+    inputEl.value = text;
+    renderAll();
+    await send();
+  }
+
+  /* ================= 世界切换 ================= */
+  function switchWorld(w, opts = {}){
+    if(busy) return;
+    const wm = worlds && worlds[w];
+    if(!wm) return;
+    const prev = world;
+    world = w;
+    try{ localStorage.setItem(LS_WORLD, w); }catch(e){}
+    document.querySelectorAll("#tabs button").forEach(b =>
+      b.classList.toggle("on", b.dataset.w === w));
+    loadHist(w);
+    applyTheme();
+    renderAll();
+
+    if(prev !== w && !opts.silent){
+      if(w === "crash"){
+        systemLine([
+          ["", "WORLD LINE ADJUSTING ……"],
+          ["", "观测对象「凉宫春日」：未找到。"],
+          ["", "SOS 团：未登记。"],
+          ["ok", "重新建立连接。对面的人记得你。"],
+        ]);
+      }else{
+        systemLine([
+          ["", "RESTORING ……"],
+          ["", "时空坐标校验：通过。"],
+          ["", "观测对象「凉宫春日」：在线。"],
+          ["ok", "通道重开。她在那头。"],
+        ]);
+      }
+    }
+  }
+
+  /* ================= 设置 ================= */
+  function renderBackendOptions(){
+    const sel = $("#s-backend");
+    if(!sel) return;
+    sel.innerHTML = '<option value="">自定义接口（下面的 BASE URL / KEY）</option>';
+    backends.forEach(b => {
+      const o = document.createElement("option");
+      o.value = b.id;
+      o.textContent = b.available ? b.name : `${b.name}（不可用）`;
+      o.disabled = !b.available;
+      sel.appendChild(o);
+    });
+    sel.value = settings.backend || "";
+    paintBackendNote();
+  }
+
+  function paintBackendNote(){
+    const note = $("#s-backend-note");
+    if(!note) return;
+    const b = backends.find(x => x.id === settings.backend);
+    if(!b){ note.textContent = "用自己的 API Key。Key 只存在浏览器里。"; return; }
+    note.textContent = b.available
+      ? `${b.detail}`
+      : `${b.name} 现在不可用：${b.reason || "未知原因"}`;
+    paintModelPicker(b);
+  }
+
+  // 有后端时用下拉（datalist 在暗色主题下弹层是白底，而且只能按已输入内容过滤，
+  // 等于没法选）；自填接口时才用文本框。
+  function paintModelPicker(b){
+    const sel = $("#s-model-select"), inp = $("#s-model"), hint = $("#s-model-note");
+    if(!sel || !inp) return;
+    const models = (b && b.models) || [];
+    if(models.length){
+      sel.innerHTML = "";
+      models.forEach(m => {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m === b.recommended ? `${m}（推荐）` : m;
+        sel.appendChild(o);
+      });
+      sel.value = models.includes(settings.model) ? settings.model : (b.recommended || models[0]);
+      sel.classList.remove("hidden");
+      inp.classList.add("hidden");
+      if(hint) hint.textContent = b.recommended ? `推荐 ${b.recommended}：实测可用、回答稳定。` : "";
+    }else{
+      sel.classList.add("hidden");
+      inp.classList.remove("hidden");
+      inp.value = settings.model || "";
+      if(hint) hint.textContent = "";
+    }
+  }
+
+  function syncBackendVisibility(){
+    const custom = $("#s-custom");
+    if(custom) custom.style.display = settings.backend ? "none" : "";
+    paintBackendNote();
+  }
+
+  async function loadBackends(){
+    try{
+      const r = await fetch("/api/backends");
+      const d = await r.json();
+      backends = d.backends || [];
+    }catch(e){ backends = []; }
+    // 没配过任何东西时，自动接上第一个可用后端 —— 让「打开就能说话」成立。
+    // 用户显式选了自定义接口（backend 为空但填了 key）就不动他的设置。
+    if(!settings.backend && !settings.api_key){
+      const ready = backends.find(b => b.available);
+      if(ready){
+        settings.backend = ready.id;
+        if(!settings.model){
+          settings.model = ready.recommended || (ready.models || [])[0] || "";
+        }
+        saveSettings();
+      }
+    }
+    // 后端报告的推荐模型变了就跟随（例如先前自动选中的 auto 是推理模型，
+    // 会长时间停在 0 字）。只在用户没手动改过模型时跟随。
+    if(settings.backend && !settings.modelTouched){
+      const b = backends.find(x => x.id === settings.backend);
+      if(b && b.recommended && settings.model !== b.recommended &&
+         (!settings.model || b.models.includes(settings.model))){
+        settings.model = b.recommended;
+        saveSettings();
+      }
+    }    renderBackendOptions();
+    syncBackendVisibility();
+  }
+
+  function openSettings(){
+    $("#s-base").value = settings.base_url || "";
+    $("#s-key").value = settings.api_key || "";
+    $("#s-model").value = settings.model || "";
+    $("#s-temp").value = settings.temperature || "0.85";
+    renderBackendOptions();
+    syncBackendVisibility();
+    show("settings");
+  }
+
+  /* ================= 浮层通用 ================= */
+  function show(id){ $("#" + id).classList.remove("hidden"); }
+  function hide(id){ $("#" + id).classList.add("hidden"); }
+  function hideAll(){
+    document.querySelectorAll(".mask").forEach(m => m.classList.add("hidden"));
+  }
+
+  /* ================= 资料终端 ================= */
+  let cxEp = null, cxOffset = 0, cxCache = null;
+
+  async function openCorpus(){
+    show("corpus");
+    if(cxEp){ return openEpisode(cxEp.ep, cxEp.offset); }
+    if(cxCache){ return renderCorpusList(); }
+    $("#cx-title").textContent = "资料终端 · 载入中";
+    $("#cx-body").innerHTML = '<p class="note">正在读取索引……</p>';
+    try{
+      const r = await fetch("/api/corpus");
+      cxCache = await r.json();
+      renderCorpusList();
+    }catch(e){
+      $("#cx-body").innerHTML = '<p class="note">读不到索引。先运行 python build_corpus.py</p>';
+    }
+  }
+
+  function renderCorpusList(){
+    $("#cx-title").textContent = `资料终端 · ${cxCache.episodes.length} 个片源`;
+    const body = $("#cx-body");
+    body.innerHTML = '<p class="note">全量原作记录，台词没有说话人标注。高亮的行是「长门 / 有希」被提到的片段——她在场，但每句是谁说的仍未知。这一点没变，也不会用假数据补。</p>';
+    const list = document.createElement("div");
+    list.className = "corpus-list";
+    cxCache.episodes.forEach(e => {
+      const row = document.createElement("div");
+      row.className = "ep" + (e.ep === "消失" ? " crash" : "");
+      row.innerHTML = `<span class="n"></span><span style="flex:1"></span><span class="t"></span>`;
+      row.children[0].textContent = e.title;
+      row.children[2].textContent = `${e.lines} 条 · ${e.start}–${e.end}`;
+      row.onclick = () => openEpisode(e.ep);
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+  }
+
+  async function openEpisode(ep, offset = 0){
+    cxEp = {ep, offset};
+    $("#cx-title").textContent = "资料终端 · " + ep;
+    $("#cx-body").innerHTML = '<p class="note">读取中……</p>';
+    try{
+      const r = await fetch(`/api/corpus?ep=${encodeURIComponent(ep)}&offset=${offset}&limit=200`);
+      const data = await r.json();
+      cxCache = cxCache || {};
+      renderEpisode(data);
+    }catch(e){
+      $("#cx-body").innerHTML = '<p class="note">读取失败。</p>';
+    }
+  }
+
+  function renderEpisode(data){
+    const body = $("#cx-body");
+    body.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "cx-head";
+    head.innerHTML = `<span class="back">← 片源</span>
+      <span class="ttl"></span>
+      <span class="rg"></span>`;
+    head.querySelector(".ttl").textContent = `${data.title}`;
+    head.querySelector(".rg").textContent = `${data.offset + 1}–${data.offset + data.items.length} / ${data.lines}`;
+    head.querySelector(".back").onclick = () => { cxEp = null; renderCorpusList(); };
+    body.appendChild(head);
+
+    data.items.forEach(it => {
+      const row = document.createElement("div");
+      row.className = "cx-line" + (it.anchor > 0 ? " anchor" : "") + (it.world === "crash" ? " crash" : "");
+      row.innerHTML = `<span class="ts"></span><span class="tx"></span>`;
+      row.querySelector(".ts").textContent = it.start;
+      row.querySelector(".tx").textContent = it.text;
+      body.appendChild(row);
+    });
+
+    if(data.offset + data.items.length < data.lines){
+      const more = document.createElement("div");
+      more.className = "cx-more";
+      more.textContent = "载入之后 200 条";
+      more.onclick = () => openEpisode(data.ep, data.offset + data.items.length);
+      body.appendChild(more);
+    }
+  }
+
+  /* ================= 校对面板 ================= */
+  async function openPreflight(){
+    show("preflight");
+    const body = $("#pf-body");
+    const text = inputEl.value.trim();
+    if(!text){ body.innerHTML = '<span class="note">先在输入框里写一句话，再点这里。</span>'; return; }
+    body.innerHTML = '<p class="note">正在组装……（这一步不花钱，不调用模型）</p>';
+    try{
+      const r = await fetch("/api/preview", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({world, message:text, history:historyForApi()})
+      });
+      const d = await r.json();
+      if(!r.ok){ body.innerHTML = `<p class="note">${escapeHtml(d.error || "失败")}</p>`; return; }
+      body.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.className = "prompt";
+      pre.textContent = d.system_prompt;
+      body.appendChild(pre);
+
+      const hits = document.createElement("div");
+      hits.className = "hits";
+      hits.innerHTML = `<div class="t">本次注入的原作记录（${d.hits.length} 条 · 共 ${d.message_count} 条消息）</div>`;
+      d.hits.forEach((h, i) => {
+        const d2 = document.createElement("div");
+        d2.className = "hit";
+        d2.innerHTML = `<b>${i + 1}</b> <span class="${h.world === world ? "" : "cr"}">${h.world === world ? "" : "〔另一世界〕"}</span> ${escapeHtml(h.ep_title)} ${escapeHtml(h.start)} · ${h.score}<br>${escapeHtml(h.text)}`;
+        hits.appendChild(d2);
+      });
+      if(!d.hits.length) hits.innerHTML += '<div class="hit">没有命中。她会凭人格回答，不会有原作依据。</div>';
+      body.appendChild(hits);
+    }catch(e){
+      body.innerHTML = '<p class="note">组装失败。</p>';
+    }
+  }
+
+  /* ================= 事件 ================= */
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + "px";
+  });
+  inputEl.addEventListener("keydown", e => {
+    if(e.key === "Enter" && !e.shiftKey && !e.isComposing){ e.preventDefault(); send(); }
+  });
+  sendBtn.onclick = send;
+
+  $("#open-settings").onclick = openSettings;
+  $("#open-corpus").onclick = openCorpus;
+  $("#open-preflight").onclick = openPreflight;
+
+  document.querySelectorAll("[data-close]").forEach(b => {
+    b.onclick = () => hide(b.dataset.close);
+  });
+  document.querySelectorAll(".mask").forEach(m => {
+    m.addEventListener("click", e => { if(e.target === m) hide(m.id); });
+  });
+
+  $("#save-settings").onclick = () => {
+    settings.backend = $("#s-backend") ? $("#s-backend").value : "";
+    settings.base_url = $("#s-base").value.trim();
+    settings.api_key = $("#s-key").value.trim();
+    // 有下拉就读下拉，否则读文本框。
+    const selEl = $("#s-model-select");
+    const useSelect = selEl && !selEl.classList.contains("hidden") && selEl.value;
+    const typedModel = useSelect ? selEl.value : $("#s-model").value.trim();
+    if(typedModel && typedModel !== settings.model) settings.modelTouched = true;
+    settings.model = typedModel;
+    settings.temperature = $("#s-temp").value.trim() || "0.85";
+    saveSettings();
+    syncBackendVisibility();
+    hide("settings");
+  };
+
+  if($("#s-backend")){
+    $("#s-backend").onchange = () => {
+      settings.backend = $("#s-backend").value;
+      // 切到可选后端时，模型名留空表示「用该后端默认模型」。
+      const b = backends.find(x => x.id === settings.backend);
+      if(b){
+        $("#s-model").value = settings.model && (b.models || []).includes(settings.model)
+          ? settings.model : ((b.models || [])[0] || "");
+      }
+      syncBackendVisibility();
+    };
+  }
+
+  $("#clear").onclick = () => {
+    if(busy) return;
+    if(!confirm("断开这次连接？当前世界的记录会被清掉（另一个世界不受影响）。")) return;
+    hist[world] = [];
+    try{ localStorage.removeItem(LS_HIST(world)); }catch(e){}
+    renderAll();
+  };
+
+  document.querySelectorAll("#presets button").forEach(b => {
+    b.onclick = () => {
+      $("#s-base").value = b.dataset.b;
+      $("#s-model").value = b.dataset.m;
+      $("#s-key").focus();
+    };
+  });
+  $("#model-tag").onclick = openSettings;
+  $("#model-tag").style.cursor = "pointer";
+
+  window.addEventListener("keydown", e => {
+    if(e.key === "Escape") hideAll();
+  });
+
+  /* ================= 启动 ================= */
+  (async () => {
+    loadSettings();
+    try{
+      const [pw, ww] = await Promise.all([
+        fetch("/api/personas").then(r => r.json()),
+        fetch("/api/worlds").then(r => r.json())
+      ]);
+      pw.forEach(p => { personas[p.id] = p; });
+      worlds = ww.worlds;
+      corpusMeta = ww.corpus;
+      await loadBackends();
+    }catch(e){
+      chatEl.innerHTML = '<div class="empty"><div class="l">连不上本地服务。</div>' +
+        '<div class="l">先运行 python server.py</div></div>';
+      return;
+    }
+
+    // 世界切换按钮
+    const tabs = $("#tabs");
+    for(const [id, meta] of Object.entries(worlds)){
+      const b = document.createElement("button");
+      b.dataset.w = id;
+      b.innerHTML = `<span>${escapeHtml(meta.name)}</span><span class="en">${escapeHtml(meta.en)}</span>`;
+      b.onclick = () => switchWorld(id);
+      tabs.appendChild(b);
+    }
+
+    let saved;
+    try{ saved = localStorage.getItem(LS_WORLD); }catch(e){}
+    switchWorld(worlds[saved] ? saved : "normal", {silent:true});
+  })();
+
+  /* ================= 工具 ================= */
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c =>
+      ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+})();
+</script>
+</body>
+</html>

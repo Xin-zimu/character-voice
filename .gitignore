@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------
+# 语料与索引：不入库
+#
+# 13070 条字幕原文来自受版权保护的动画字幕，不适合随公开仓库分发。
+# 克隆后请自备字幕，放在 data/parsed/*.dialogue.jsonl，再运行:
+#     py build_corpus.py
+# 没有语料时，程序与测试会降级运行（不注入原作片段），不会崩。
+# ---------------------------------------------------------------
+data/parsed/
+data/index/
+data/_deprecated/
+data/scenes/
+
+# L2 人工标注是本机工作产物，按需自行管理
+data/labeled/
+
+# 本地运行产出
+out/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------
+# 凭证：绝不允许入库
+#
+# qoder_backend.mjs 的端点令牌只写在 ~/.dsh/qoder-backend/state.json，
+# 那在仓库外。这里再兜一层，防止有人误把状态或凭证复制进来。
+# ---------------------------------------------------------------
+.env
+.env.*
+*credential*
+*secret*
+*.pem
+*.key
+.qoder-auth.json
+.qoder-global-auth.json
+qoder-backend/
