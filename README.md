@@ -31,6 +31,8 @@
 
 **本仓库不包含字幕语料**（版权原因）。克隆后需要自备字幕，否则检索为空——程序能跑，但不会有原作片段。
 
+> 本机开发时，语料与 BM25 索引单独放在**私有仓库** `Xin-zimu/character-voice-corpus`（不含在本公开仓库里）。克隆回来把 `parsed/`、`index/`、`scenes/`、`_deprecated/` 拷进 `data/` 即可，还原步骤见该仓库的 README。
+
 ```powershell
 cd character-voice
 # 1. 把解析好的字幕放进 data/parsed/*.dialogue.jsonl（格式见 data/README.md）

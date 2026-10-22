@@ -487,7 +487,7 @@ py scripts/test_backend.py    # 后端与检索
 | 两个检测器不同步 | 前端与自检结论不一致 | `test_frontend.js` 的逐例比对必须保留 |
 | 文档与实现相反 | README 仍写「漏话是玩法」 | 每阶段结束同步 README 的「待调整」表 |
 
-**回滚**：仓库已托管在 GitHub（`Xin-zimu/character-voice`，公开仓库），日常改动可直接用 git 回退。但 `out/`、`data/parsed/`、`data/index/` 按 `.gitignore` **不入库**——语料和本地备份不受版本控制保护，所以每阶段开始前仍要打一份 `out/plan-backup-<日期>.zip`（照 `out/merge-backup-20261021-212702.zip` 的做法）。换句话说：git 管代码与文档，zip 管语料与运行产物。
+**回滚**：代码与文档托管在 GitHub（`Xin-zimu/character-voice`，公开仓库），可直接用 git 回退；语料与索引在私有仓库 `Xin-zimu/character-voice-corpus`，也有版本历史。剩下 `out/`（聊天记录、备份 zip）不在任何仓库里，所以每阶段开始前仍要打一份 `out/plan-backup-<日期>.zip`（照 `out/merge-backup-20261021-212702.zip` 的做法）。换句话说：git 管代码、文档与语料，zip 只管本地运行产物。
 
 ---
 

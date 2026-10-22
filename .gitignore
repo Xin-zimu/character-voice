@@ -5,6 +5,10 @@
 # 克隆后请自备字幕，放在 data/parsed/*.dialogue.jsonl，再运行:
 #     py build_corpus.py
 # 没有语料时，程序与测试会降级运行（不注入原作片段），不会崩。
+#
+# 本机开发时这批文件另有私有仓库备份：
+#     https://github.com/Xin-zimu/character-voice-corpus
+# 还原方式见该仓库的 README。语料永远不要提交到这个公开仓库。
 # ---------------------------------------------------------------
 data/parsed/
 data/index/
