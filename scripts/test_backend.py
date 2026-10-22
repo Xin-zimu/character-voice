@@ -245,6 +245,61 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn('Qoder', json.loads(raw)['error'])
 
+    def test_12_persona_no_superseded_framing(self):
+        """人格卡里被审计判定为越界的表述不得回流（CHARACTER AUD-01/02/04）。
+
+        - 「用词越少越好」与 CHAT-003 冲突：字数上限已取消，这句话等于把
+          隐藏的配额写回提示词。
+        - 「情绪恒定」把外在克制推成内在事实，SRC-01 不支持。
+        - 「作为助手处理用户提出的问题」「不做安慰」「直接给建议」把任务助手
+          定位写进身份，与 SCOPE-001 的聊天优先方向相反；给建议必须是应答
+          对方的求助，不是默认动作，所以旧规则句和相关示例一起改。
+
+        每一项都成对断言：废止的不在，改写的在。只查前者会被「整段删掉」
+        绕过——那不算改写。只断言结构，不评价她说话像不像，后者属于
+        VALIDATION 的 C 类证据。
+        """
+        AUD = {
+            'AUD-01': {
+                'gone': ['情绪恒定'],
+                'kept': ['情绪外露很少'],
+            },
+            'AUD-02': {
+                'gone': ['用词越少越好', '大多数时候用一两个词就够了'],
+                'kept': ['一句能说完就不说两句'],
+            },
+            'AUD-04': {
+                # 「直接给建议或直接说该做什么」是无条件给建议，与同段
+                # 「对方没有求助时，不主动给建议」自相矛盾，必须一起清掉。
+                'gone': ['作为助手处理用户提出的问题', '【作为助手的工作方式】',
+                         '不做安慰', '直接给建议或直接说该做什么'],
+                'kept': ['持续的通讯', '【相处方式】', '对方没有求助时',
+                         '对方在问该怎么办时'],
+            },
+        }
+        cards = server.load_personas()
+        p = pb.persona_for(cards, 'normal')
+        system = pb.build_messages(p, 'normal', [], [], '测试')[0]['content']
+        # 成对断言：废止的说法必须不在，改写后的说法必须在。
+        # 只做前者会被「整段删掉」绕过——删掉段落同样能让 assertNotIn 通过。
+        for aud, rules in AUD.items():
+            for phrase in rules['gone']:
+                self.assertNotIn(phrase, system,
+                                 f'{aud}：prompt 仍含已废止表述「{phrase}」')
+            for phrase in rules['kept']:
+                self.assertIn(phrase, system,
+                              f'{aud}：prompt 缺少改写后的「{phrase}」'
+                              f'——删掉段落不等于改写')
+
+        # 示例也在示范：旧示例「我明天要考试，好慌 → 现在看三章」
+        # 教的正是无条件给建议，与 AUD-04 的新规则相反。
+        asks = [e['user'] for e in p['examples']]
+        self.assertNotIn('我明天要考试，好慌', asks,
+                         'AUD-04：示例仍在示范「对方没说怎么办就直接给方案」')
+        self.assertTrue(any('怎么办' in u for u in asks),
+                        'AUD-04：示例里缺少「对方明确问该怎么办」的样本，'
+                        '无法示范给建议的边界')
+
 
 if __name__ == '__main__':
     # Windows + Python 3.13 上遇到过陈旧 __pycache__ 触发的 CPython 致命错误
