@@ -188,12 +188,14 @@ print(json.dumps([p.build_messages(card,'normal',[],h,'本次提问') for h in d
     input: JSON.stringify([T.historyForApi(), history.slice(0, 6)])});
   assert.equal(built.status, 0, built.stderr);
   const [long, short] = JSON.parse(built.stdout);
-  // 切分点：第一条 system 之后是 2×示例条数 条示例，再往后是真实历史。
-  // 不能再用「以上是语气示例」定位——那句收尾语与截断说明都已并进第一条
-  // system（见 prompt_builder.build_messages 与 test_09b / test_07）。
-  // 用示例条数定位还有个好处：示例若被插进历史段，len 断言会立刻报。
-  const real = msgs => msgs.slice(1 + 2 * cards[0].examples.length, -1)
-    .filter(m => m.role !== 'system');
+  // 切分点（AUD-14 之后简化了）：
+  // 示例已折进第一条 system，**不再占据消息位置**，所以真实历史直接从
+  // 第 1 条开始、到最后一条正文之前。
+  //
+  // 旧写法是 `msgs.slice(1 + 2 * cards[0].examples.length, -1)` —— 按
+  // 「示例占 2N 条消息」算偏移。示例改到 system 里之后那个偏移量就不再成立，
+  // 会把真实历史整段切掉。保留这段说明，免得以后又按条数去算。
+  const real = msgs => msgs.slice(1, -1).filter(m => m.role !== 'system');
   const conv = real(long);
   // Preserve the original v1 suite's 14 acceptance checks.
   ok(conv.length === 24, '最近 12 轮历史进入实际 prompt');

@@ -571,6 +571,34 @@ def m_examples_share_filler(card):
     return card
 
 
+def m_examples_back_to_message_pairs(src):
+    """把示例铺回 user/assistant 消息对 —— AUD-14 的缺陷原样回来。
+
+    这是本轮最值得防的回退：从「能跑通」的角度看，把示例铺成消息对**更自然**
+    （few-shot 的标准写法），而且工程测试全绿。但它会让模型把示例当成真实
+    对话历史，实测 13～14 / 20 次答「你刚才也问过」——只有真实模型试聊
+    才看得见，回归测试完全测不到结构后果。
+
+    所以必须有一条测试在**结构层**挡住它：`test_09d_examples_are_not_message_pairs`。
+    """
+    marker = '            example_lines.append(f"对方：{u}")'
+    assert marker in src, '变异失效：找不到示例折进 system 的那一行'
+    old = ('    for ex in examples:\n'
+           '        u, a = ex.get("user", ""), strip_prefix(ex.get("assistant", ""))\n'
+           '        if u and a:\n'
+           '            example_lines.append(f"对方：{u}")\n'
+           '            example_lines.append(f"你：{a}")\n'
+           '            sent += 1')
+    new = ('    for ex in examples:\n'
+           '        u, a = ex.get("user", ""), strip_prefix(ex.get("assistant", ""))\n'
+           '        if u and a:\n'
+           '            msgs.append({"role": "user", "content": u})\n'
+           '            msgs.append({"role": "assistant", "content": a})\n'
+           '            sent += 1')
+    assert old in src, '变异失效：找不到示例处理循环的完整形状'
+    return src.replace(old, new, 1)
+
+
 def m_example_for_disagreement_removed(card):
     """删掉「意见分歧」示例 —— 规则还在，但没人示范它（AUD-08 反向）。"""
     before = len(card['examples'])
@@ -731,6 +759,8 @@ MUTATIONS = [
      m_memory_subject_dropped, 'backend'),
     ('M59', 'R-08 反向：删掉字符画的格式例外说明', 'prompt_builder.py',
      m_art_exception_removed, 'backend'),
+    ('M60', 'AUD-14 反向：示例又铺成 user/assistant 消息对', 'prompt_builder.py',
+     m_examples_back_to_message_pairs, 'backend'),
 ]
 
 

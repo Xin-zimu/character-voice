@@ -18,21 +18,32 @@ import textart
 sys.path.insert(0, str(ROOT / 'scripts'))
 import check_persona
 
-# 语料不入库（版权原因）。没有 data/parsed 时这些测试无从谈起，
-# 应当跳过并说明原因，而不是报红——否则克隆者会以为代码坏了。
+# 语料不入库（版权原因）。没有 data/index 时，**只有依赖字幕的用例**应当跳过，
+# 其余用例（人格卡、记忆、场景、消息组装、字符画判据……）照常跑。
+#
+# 为什么必须分组（2026-10-24）：原来这里在 `BackendTests.setUpClass` 里
+# `raise SkipTest`，于是**整个类**被跳过——克隆者跑出来是「后端 0 项」，
+# 看起来像全绿，实际什么都没验。那比红更危险：红的测试会让人去修，
+# 被跳过的测试只会让人以为没事。
+#
+# 现在的形状：
+#   BackendTests         —— 不碰字幕，任何机器都能跑
+#   CorpusTests(BackendTests) —— 依赖字幕，没有索引就只跳过这几个
 CORPUS_READY = (ROOT / 'data' / 'index' / 'docs.jsonl').exists()
 NO_CORPUS_REASON = (
-    '语料未包含在本仓库中（版权原因）。请先自备 data/parsed/*.dialogue.jsonl，'
-    '再运行 py build_corpus.py 生成索引。'
+    '这条用例依赖字幕索引（语料未包含在本仓库中，版权原因）。'
+    '请先自备 data/parsed/*.dialogue.jsonl，再运行 py build_corpus.py。'
 )
 
 
 class BackendTests(unittest.TestCase):
+    """不依赖字幕的用例：起一个本地服务，跑 HTTP 与组装逻辑。
+
+    **这里的 setUpClass 不检查语料** —— 没有字幕时这些用例一样有意义。
+    """
+
     @classmethod
     def setUpClass(cls):
-        if not CORPUS_READY:
-            raise unittest.SkipTest(NO_CORPUS_REASON)
-        cls.corpus = server.load_corpus()
         cls.app = server.Server(('127.0.0.1', 0), server.Handler)
         cls.thread = threading.Thread(target=cls.app.serve_forever, daemon=True)
         cls.thread.start()
@@ -165,13 +176,33 @@ class BackendTests(unittest.TestCase):
                 app.server_close()
         self.assertEqual(server.Server.allow_reuse_address, sys.platform != 'win32')
 
+    # ------------------------------------------------------------------
+    # 依赖字幕的用例（2026-10-24 起按下述方式分组）
+    #
+    # 仍然是 BackendTests 的方法，但**各自**在开头调用 `_need_corpus()`。
+    # 这样没有索引时只跳过这几个，而不是整个类消失。
+    #
+    # 为什么不用单独的子类装它们：那些用例要复用 `request()`、`memory_dir()`
+    # 等一批 helper，拆出去要么复制 helper、要么多重继承，两种都比现在难读。
+    # 而且拆类会把这些用例从 `BackendTests` 的其它 setUp/tearDown 约定里剥离，
+    # 属于为了「整齐」付出真实风险。这里要的是**跳过粒度**，不是类的美观。
+    # ------------------------------------------------------------------
+    @classmethod
+    def _need_corpus(cls):
+        if not CORPUS_READY:
+            raise unittest.SkipTest(NO_CORPUS_REASON)
+        if not hasattr(cls, 'corpus') or cls.corpus is None:
+            cls.corpus = server.load_corpus()
+
     def test_03_complete_corpus(self):
+        self._need_corpus()
         self.assertEqual(self.corpus.size, 13070)
         self.assertEqual(len(self.corpus.episodes), 29)
         self.assertEqual(sum(d['world'] == 'crash' for d in self.corpus.docs), 1574)
         self.assertEqual(len({d['id'] for d in self.corpus.docs}), 13070)
 
     def test_04_retrieval_anchors(self):
+        self._need_corpus()
         hits = self.corpus.search('normal', '信息统合思念体是什么', k=5)
         self.assertTrue(any(h['ep'] == '03' and '信息统合思念体意识的一部分' in h['text'] for h in hits))
         self.assertTrue(any(h['ep'] == '06' and 'YUKI.N>凉宫春日' in h['text'] for h in hits))
@@ -192,6 +223,7 @@ class BackendTests(unittest.TestCase):
         注意「你为什么戴眼镜」在当前世界本来就能回答，
         所以标准不是「命中为空」，而是「不含另一世界的片段」。
         """
+        self._need_corpus()
         for world, other in (('crash', 'normal'), ('normal', 'crash')):
             status, raw = self.request('/api/preview',
                                        {'world': world, 'message': '你为什么戴眼镜'})
@@ -245,6 +277,7 @@ class BackendTests(unittest.TestCase):
         第 2 点是关键：它不假设哪几行会被裁掉，而是拿「出现的每个时间码」
         去反查世界。裁多了不算错（宁可缺），出现另一世界的行才算错。
         """
+        self._need_corpus()
         # 1) 索引层：逐行世界标注存在且自洽
         for d in self.corpus.docs:
             self.assertIn('ctx_worlds', d,
@@ -319,6 +352,7 @@ class BackendTests(unittest.TestCase):
 
     def test_05b_retriever_filters_by_world(self):
         """检索层必须硬过滤，而不是降权。"""
+        self._need_corpus()
         for world in ('normal', 'crash'):
             hits = self.corpus.search(world, '凉宫春日 信息统合思念体', k=8)
             self.assertTrue(hits, f'{world} 检索不应为空')
@@ -383,19 +417,45 @@ class BackendTests(unittest.TestCase):
     def test_09_all_examples_reach_prompt(self):
         """人格卡的示例必须全部进入 prompt。
 
-        以前 build_messages 写死 [:14]，超出部分被静默丢弃 ——
-        改了 JSON 却没效果，且没有任何提示。这里锁住该行为。
+        **本用例已按 AUD-14 显式重写（2026-10-23），保留旧断言与改写理由。**
+
+        旧断言（已被替代）：
+            sent = [m for m in msgs if m['role'] == 'assistant']
+            self.assertEqual([m['content'] for m in sent],
+                             [pb.strip_prefix(e['assistant']) for e in p['examples']])
+
+        它锁的是「示例以 assistant 消息的形式发出，且一条不少」。
+        **为什么必须改写**：2026-10-23 实测发现，正是「示例铺成消息对」这个
+        结构让模型把它们当成真实对话——空历史问「你知道信息统合思念体吗」，
+        13～14 / 20 次答「你刚才也问过」。对比实验见 `test_09d` 的说明。
+        现在示例折进 system 的【语气示例】段，消息序列里不再有示例消息。
+
+        新断言仍然锁「一条不少」这个**实质**（防止回到 `[:14]` 静默截断），
+        但改为在 system 文本里逐条核对，而不是数 assistant 消息的条数。
         """
         cards = server.load_personas()
         for world in ('normal', 'crash'):
             p = pb.persona_for(cards, world)
             msgs = pb.build_messages(p, world, [], [], '测试')
-            sent = [m for m in msgs if m['role'] == 'assistant']
-            self.assertEqual(len(sent), len(p['examples']),
-                             f'{p["id"]} 示例被截断：卡内 {len(p["examples"])} 条，'
-                             f'实际发送 {len(sent)} 条')
-            self.assertEqual([m['content'] for m in sent],
-                             [pb.strip_prefix(e['assistant']) for e in p['examples']])
+            system = msgs[0]['content']
+
+            # 1) 示例区在 system 里，条数写对
+            self.assertIn('【语气示例', system, f'{p["id"]} 的示例段不见了')
+            self.assertIn(f'共 {len(p["examples"])} 组', system,
+                          f'{p["id"]} 的示例组数与卡里不一致')
+
+            # 2) 每一条都真的在里面（这正是旧断言要防的「静默截断」）
+            for i, e in enumerate(p['examples'], 1):
+                u = e['user']
+                a = pb.strip_prefix(e['assistant'])
+                self.assertIn(f'对方：{u}', system,
+                              f'{p["id"]} 第 {i} 组的提问没进 prompt')
+                self.assertIn(f'你：{a}', system,
+                              f'{p["id"]} 第 {i} 组的回答没进 prompt')
+
+            # 3) 消息序列里不能再有示例消息（结构修复本身）
+            self.assertNotIn('assistant', [m['role'] for m in msgs],
+                             f'{p["id"]} 又把示例铺成消息对了（AUD-14 回退）')
 
     def test_10_backends_endpoint(self):
         """/api/backends 必须始终回答，且不泄露上游凭证。
@@ -629,27 +689,32 @@ class BackendTests(unittest.TestCase):
                       'WORLD-001：崩溃世界必须明确否定主线身份，删掉这句就失去了隔离')
 
     def test_09b_single_system_message(self):
-        """示例收尾语不能单独成一条 system 消息（结构断言，不是查字符串）。
+        """消息序列形状：单条 system + 严格交替 + 以 user 收尾。
 
-        改前最后几条是：
-            assistant「能。但不会。」→ system「以上是语气示例。现在开始真实通讯……」
-            → user「我这次考试考砸了」
-        OpenAI 兼容实现对此并不一致：有的把多段 system 拼成前缀，有的把非首条
-        system 当作用户侧提示塞进对话流。后者会让那句话紧接在一条助手回复后面，
-        读起来像「这句还没说完」——被模型当成待续的助手消息。
+        **本用例已按 AUD-14 显式重写（2026-10-23），保留旧断言与改写理由。**
 
-        断言的是**序列形状**：
-          - 有且只有一条 system，且必须在第 0 位；
-          - 最后一条必须是 user（不能以 assistant 收尾，否则部分实现会让模型
-            续写最后那条 assistant）；
-          - 紧接 system 的那一段必须是成对交替的 user/assistant，且最后一对是
-            第 25 组示例（顺序不错位）；
-          - 示例段之后必须还有内容，且也只能是成对交替的 user/assistant。
+        旧断言（已被替代）里有两条现在不成立：
+            self.assertEqual(msgs[1]['content'], p['examples'][0]['user'])
+            self.assertEqual(msgs[-2]['content'].strip(),
+                             pb.strip_prefix(p['examples'][-1]['assistant']))
+        它们断言「system 之后第一条是示例首句」「末条之前是示例最后一条回复」——
+        即**示例以消息对的形式出现在序列里**。
 
-        注意这里**不可**用 `len(history)` 或「一直读到不是 user 为止」来切：
-        前者的坑是历史里有空白/非 user 条目时实际条数更少，切片错位，最坏
-        情况切空、断言退化成 `[] == []`；后者会把正文那条 user 一起吞进示例段。
-        两者都在本轮调试中被踩到过，是复审先指出的。
+        **为什么必须改写**：2026-10-23 实测，正是这个结构让模型把示例当成
+        真实对话（空历史答「你刚才也问过」，13～14 / 20 次）。示例改成折进
+        system 之后实测降到 0/10，见 `test_09d`。所以「示例必须是消息对」
+        这条旧契约本身就是要移除的缺陷，不是被弄坏的实现。
+
+        仍然保留、且**一条都不放宽**的实质约束：
+          - 有且只有一条 system，且在第 0 位（非首条 system 各家处理不一致）；
+          - 最后一条必须是 user；
+          - 除首条 system 外严格 user/assistant 交替、以 user 起；
+          - 正文出现在最后一条 user 里；
+          - 各种畸形 history（空白、tool、None、system）都不能弄坏序列。
+
+        原来那套「切示例段 / 切历史段」的复杂切法也随之简化：
+        示例既然不在序列里，就不需要再切它们了——但历史与正文的合并规则
+        仍然用同样的形状断言覆盖，这部分是它的核心价值，没有减少。
         """
         cards = server.load_personas()
         bad_histories = [
@@ -677,13 +742,9 @@ class BackendTests(unittest.TestCase):
                     self.assertEqual(roles[-1], 'user',
                                      f'{p["id"]}：消息以 {roles[-1]} 收尾')
 
-                    # 切出「示例段 + 历史 + 正文」，整体必须成对交替、以 user 起、
-                    # 以 user 止（正文总是 user）。若出现相邻同角色或 assistant 起头，
-                    # 说明合并或截断把序列弄坏了。
-                    # 整体必须是严格交替的 user/assistant，且以 user 收尾。
-                    # 不能要求「正文独占最后一条」：历史最后一条也是 user 时
-                    # （上一轮没拿到回复），两条 user 相邻会被上游拒收，
-                    # 实现会把正文并进那一条——此时末条 content 含正文。
+                    # 除首条 system 外，整体必须严格交替的 user/assistant，
+                    # 且以 user 起、以 user 止（正文总是 user）。若出现相邻同角色
+                    # 或 assistant 起头，说明合并或截断把序列弄坏了。
                     body = roles[1:]
                     self.assertEqual(body, ['user', 'assistant'] * (len(body) // 2)
                                      + (['user'] if len(body) % 2 else []),
@@ -691,15 +752,57 @@ class BackendTests(unittest.TestCase):
                     self.assertIn('测试', msgs[-1]['content'],
                                   f'{p["id"]}：正文没有出现在最后一条 user 里')
 
-                    # 示例必须真的在：至少有一对，且第一条是示例首句。
-                    self.assertGreaterEqual(len(body), 3)
-                    self.assertEqual(msgs[1]['content'], p['examples'][0]['user'],
-                                     f'{p["id"]}：system 之后第一条不是示例首句')
-                    # 最后一条示例必须紧挨在正文之前（若有历史则紧挨历史）
-                    if not history:
-                        self.assertEqual(msgs[-2]['role'], 'assistant')
-                        self.assertEqual(msgs[-2]['content'].strip(),
-                                         pb.strip_prefix(p['examples'][-1]['assistant']))
+                    # 示例必须在 system 里（不在序列里，但不能凭空消失）
+                    self.assertIn('【语气示例', msgs[0]['content'],
+                                  f'{p["id"]}：示例段不在 system 里')
+                    self.assertEqual(
+                        msgs[0]['content'].count('对方：'), len(p['examples']),
+                        f'{p["id"]}：system 里的示例条数与卡不一致')
+
+    def test_09d_examples_are_not_message_pairs(self):
+        """示例必须折进 system，**不能**铺成消息对（AUD-14）。
+
+        这是 2026-10-23 用真实模型查出来的，证据在这条用例里写清楚：
+
+        现象：空历史问「你知道信息统合思念体吗」，她答「你刚才也问过」——
+              凭空造出一段不存在的对话。同理，「你还记得我上次说的那件事吗」
+              会答「记得。面试那件。」
+
+        对比实验（dfmodel，同一句话，温度 0.3，每档 10～20 次）：
+
+            | 做法                             | 出现「刚才问过」|
+            |----------------------------------|----------------|
+            | 示例铺成 user/assistant 消息对    | 13～14 / 20    |
+            | 只改 system 里那句说明的措辞      | 14 / 20        |
+            | 给示例消息加 `name: example`      | 7 / 10         |
+            | 示例折叠进 system                 | 0 / 10         |
+            | 完全不给示例（对照）              | 0 / 10         |
+
+        结论：这不是措辞问题，是**结构问题**。只要示例和真实对话在消息序列里
+        长得一样，模型就分不开；在 system 里加多少句「这不是真的事」都压不住。
+
+        所以这条用例锁的是结构：**序列里不许出现 assistant 消息**。
+        它挡的是「有人为了恢复 few-shot 形状又把示例铺回去」——
+        那样做会让缺陷原样回来，而且在工程测试里完全看不出来。
+        """
+        cards = server.load_personas()
+        for world in ('normal', 'crash'):
+            p = pb.persona_for(cards, world)
+            self.assertTrue(p['examples'], f'{p["id"]} 没有示例，用例失去意义')
+            for history in ([], [{'role': 'user', 'content': '在吗'},
+                                 {'role': 'assistant', 'content': '在。'}]):
+                with self.subTest(world=world, hist=len(history)):
+                    msgs = pb.build_messages(p, world, [], history, '测试')
+                    roles = [m['role'] for m in msgs]
+                    # 只允许真实历史带来的 assistant；没有历史时一条都不许有。
+                    expected = sum(1 for m in history if m['role'] == 'assistant')
+                    self.assertEqual(
+                        roles.count('assistant'), expected,
+                        f'{p["id"]}：序列里有 {roles.count("assistant")} 条 assistant，'
+                        f'期望 {expected} 条。示例可能又被铺成消息对了（AUD-14 回退）')
+                    # 示例内容必须在 system 里，不能靠「删掉示例」来通过
+                    self.assertIn(p['examples'][0]['user'], msgs[0]['content'],
+                                  f'{p["id"]}：示例既不在序列里也不在 system 里')
 
     def test_09c_history_merges_adjacent_same_role(self):
         """过滤掉中间条目后留下的相邻同角色必须合并。

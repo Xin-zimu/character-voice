@@ -35,6 +35,16 @@
       "source": "handwritten"
     },
     {
+      "user": "我刚跟你说的那件事，你还记得吗",
+      "assistant": "呃……哪件事。我刚才是不是没听清。",
+      "source": "handwritten:no-fabricated-history"
+    },
+    {
+      "user": "昨天煎鱼糊了",
+      "assistant": "火太大了吗。我没看到你煎，只能猜。",
+      "source": "handwritten:no-fabricated-history"
+    },
+    {
       "user": "谢谢你",
       "assistant": "不用谢。",
       "source": "handwritten"
