@@ -107,6 +107,25 @@
     text-shadow:0 0 20px rgba(127,178,196,.13);
   }
   .line .caret{color:var(--accent);animation:blink 1.05s steps(2) infinite;margin-left:1px;font-size:12px}
+  /* 字符画（CHAT-017）：必须 pre，不然空白被折叠，图案塌成一团。
+     word-break 在 pre 下也不该动，宁可出横向滚动条——折行会把图案劈成两半。
+     字体与正文同一套等宽，不另配：「能不能显示」比「好不好看」重要，
+     另配一套字体等于在赌用户机器上有它。 */
+  .line .txt.art{
+    white-space:pre; overflow-x:auto; word-break:normal; letter-spacing:0;
+    line-height:1.35;
+  }
+  /* 窄屏：缩放而不是折行。transform 不影响布局，也不改字符宽度比例，
+     所以图案的比例不会变形——这是「缩」和「折」的关键区别。 */
+  .line .txt.art.shrink{transform-origin:left top}
+  /* 多块排版：一个 .txt 里既有文字块又有图案块。折行与保空白是逐块的，
+     不能挂在父节点上——父节点一保空白，文字行就跟着被压成一行。 */
+  .line .txt.multi{white-space:normal}
+  .line .txt .blk{display:block;margin:0}
+  .line .txt .blk.art{
+    white-space:pre; overflow-x:auto; word-break:normal; letter-spacing:0;
+    line-height:1.35;
+  }
   @keyframes blink{50%{opacity:0}}
 
   .meta{
@@ -245,6 +264,41 @@
   }
   .cx-more:hover{border-color:var(--accent)}
 
+  /* 共同经历 */
+  .mem-add{display:flex;gap:6px;margin-bottom:12px}
+  .mem-add input{
+    flex:1;background:var(--bg);border:1px solid var(--line);color:var(--text);
+    padding:7px 9px;font-size:12px;border-radius:2px;outline:none;
+  }
+  .mem-add input:focus{border-color:var(--accent)}
+  .mem-add button{
+    background:var(--bg);border:1px solid var(--line);color:var(--dim);font-family:var(--mono);
+    font-size:10.5px;padding:0 12px;border-radius:2px;cursor:pointer;
+  }
+  .mem-add button:hover{color:var(--accent);border-color:var(--accent)}
+  .mem-rec{padding:8px 0;border-bottom:1px solid var(--line)}
+  .mem-rec .tx{font-size:12.5px;line-height:1.75;color:var(--text);word-break:break-word}
+  .mem-rec.retired .tx{color:var(--dim);text-decoration:line-through}
+  .mem-rec .mt{font-family:var(--mono);font-size:9.5px;color:var(--dim);margin-top:5px;letter-spacing:.04em}
+  .mem-rec .mt .tag{color:#b98a6a}
+  .mem-rec .ops{margin-left:auto;display:flex;gap:9px}
+  .mem-rec .ops span{cursor:pointer;color:var(--dim)}
+  .mem-rec .ops span:hover{color:var(--accent)}
+  .mem-rec .row2{display:flex;align-items:center;gap:8px}
+  .mem-log{margin-top:15px;border-top:1px solid var(--line);padding-top:11px}
+  .mem-log .t{font-family:var(--mono);font-size:9.5px;color:var(--dim);letter-spacing:.12em;margin-bottom:7px}
+  .mem-log .ev{font-family:var(--mono);font-size:10px;line-height:1.8;color:var(--dim)}
+
+  /* 调试面板 */
+  .dbg-msg{margin-bottom:13px}
+  .dbg-msg .who{font-family:var(--mono);font-size:9.5px;color:var(--dim);letter-spacing:.12em;margin-bottom:4px}
+  .dbg-msg .bod{font-size:12px;line-height:1.8;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .dbg-stats{display:flex;flex-wrap:wrap;gap:12px;font-family:var(--mono);font-size:10.5px;color:var(--dim);
+    padding:9px 0 12px;border-bottom:1px solid var(--line);margin-bottom:13px}
+  .dbg-stats b{color:var(--text);font-weight:400}
+  .dbg-sec{font-family:var(--mono);font-size:9.5px;color:var(--dim);letter-spacing:.12em;margin:15px 0 7px}
+  .dbg-wing{color:#c47a5a}
+
   /* 校对面板 */
   pre.prompt{
     font-family:var(--mono);font-size:10.5px;line-height:1.75;color:var(--text);
@@ -275,7 +329,8 @@
       </div>
       <div class="controls">
         <button class="btn icon-btn" id="open-corpus" title="资料终端：翻原作原文">▤</button>
-        <button class="btn icon-btn" id="open-preflight" title="校对：这次实际发出去的 prompt">◇</button>
+        <button class="btn icon-btn" id="open-memory" title="共同经历：她记得你的事">◈</button>
+        <button class="btn icon-btn" id="open-preflight" title="调试：上一轮实际发送 + 下一次预览">◇</button>
         <button class="btn icon-btn" id="open-settings" title="接口设置">⚙</button>
         <button class="btn icon-btn" id="clear" title="断开这次连接">×</button>
       </div>
@@ -297,7 +352,8 @@
     <div class="footnote">
       <span>Enter 发送 · Shift+Enter 换行</span>
       <span class="r">
-        <span id="stat">—</span>
+        <!-- 底栏不放统计（CHAT-006）：这里只留「她用什么模型」。
+             字数、违例、命中片段都在 ◇ 面板里。 -->
         <span id="model-tag">未配置模型</span>
       </span>
     </div>
@@ -356,11 +412,22 @@
   </div>
 </div>
 
+<!-- 共同经历 -->
+<div class="mask hidden" id="memory">
+  <div class="sheet">
+    <div class="head">
+      <h2 id="mem-title">共同经历</h2>
+      <button class="x" data-close="memory">×</button>
+    </div>
+    <div class="bodyx" id="mem-body"></div>
+  </div>
+</div>
+
 <!-- 校对 -->
 <div class="mask hidden" id="preflight">
   <div class="sheet">
-    <div class="head"><h2>PREFLIGHT · 这次会发出去什么</h2><button class="x" data-close="preflight">×</button></div>
-    <div class="bodyx" id="pf-body"><span class="note">先输入一句话，再点这里。</span></div>
+    <div class="head"><h2>DEBUG · 上一轮实际发送 / 下一次预览</h2><button class="x" data-close="preflight">×</button></div>
+    <div class="bodyx" id="pf-body"><span class="note">还没有对话记录。</span></div>
   </div>
 </div>
 
@@ -385,6 +452,11 @@
   let hist = { normal: [], crash: [] };   // 每条 {role, content, chars, warn}
   let busy = false;
   let settings = { backend:"", base_url:"", api_key:"", model:"", temperature:"0.85" };
+  // 最近一次真正发往 /api/chat 的请求与它的结果摘要（CHAT-006-B）。
+  // 只留最近一次：面板要回答的是「刚才那条是怎么发的」，不是历史审计。
+  // 存的是 payload 副本，**不含 api_key**——调试面板会把内容渲染到页面上，
+  // 把 key 放进去等于把它显示出来。
+  let lastSent = null;
 
   /* ================= 持久化 ================= */
   function loadSettings(){
@@ -453,8 +525,14 @@
     return m && (m.role === "user" || m.role === "assistant" || m.sys);
   }
 
+  // 重画时如果调试面板是开着的，让它跟着刷新：面板显示的是「当前世界」的
+  // 统计与违例，切世界或清空之后还挂着旧数据会误导。
   function renderAll(){
     chatEl.innerHTML = "";
+    // 面板开着就跟着重画。判断用 classList 而不是隐藏状态变量：
+    // 面板的显示由 CSS 类控制，多存一份状态迟早不同步。
+    const pf = $("#preflight");
+    if(pf && !pf.classList.contains("hidden") && typeof renderDebug === "function") renderDebug();
     const msgs = hist[world].filter(visible);
     if(!msgs.length){ renderEmpty(); paintStat(); return; }
     hist[world].forEach((m, i) => {
@@ -523,13 +601,15 @@
       <div class="body">
         <div class="line"><span class="pre"></span><span class="txt"></span></div>
         <div class="meta">
-          <span class="count"></span>
           <span class="flag"></span>
           <button class="regen">重说</button>
         </div>
       </div>`;
     wrap.querySelector(".pre").textContent = prefix;
-    wrap.querySelector(".txt").textContent = m.content;
+    const txtNode = wrap.querySelector(".txt");
+    // 按块排版：图案块保空白不折行，文字块正常折行（见 artBlocks 的说明）。
+    txtNode.classList.add("multi");
+    renderBlocks(txtNode, m.content);
     applyMeta(wrap, m);
     wrap.querySelector(".regen").onclick = () => regenerate(idx);
     return wrap;
@@ -554,9 +634,9 @@
     scrollDown();
   }
 
+  // CHAT-006：字数不进主聊天区。这里只留「这一条有没有问题」的提示，
+  // 具体多少字去 ◇ 面板看。「重说」是操作，不是统计，留着。
   function applyMeta(node, m){
-    const chars = (m.content || "").replace(/\s/g, "").length;
-    node.querySelector(".count").textContent = chars + " 字";
     const flag = node.querySelector(".flag");
     if(m.warn){
       flag.textContent = "△ " + m.warn;
@@ -567,12 +647,27 @@
     }
   }
 
-  function paintStat(){
-    const ai = hist[world].filter(m => m.role === "assistant");
-    const st = $("#stat");
-    if(!ai.length){ st.textContent = "—"; return; }
-    const total = ai.reduce((s, m) => s + (m.content || "").replace(/\s/g, "").length, 0);
-    st.textContent = `本轮 ${total} 字 · 平均 ${(total / ai.length).toFixed(1)} 字/句`;
+  // CHAT-006：统计从主聊天区移到 ◇ 面板，底栏不再有 #stat。
+  // 保留这个函数只是为了让散在各处的调用点不用改；它现在什么都不做，
+  // 统计由 renderDebug() 现算。真正的「删掉」要连调用点一起清，
+  // 但那会让每次重绘多绕一处，收益不大——留一个空函数比留一行假数据安全。
+  function paintStat(){}
+
+  function chatStats(w = world){
+    const ai = hist[w].filter(m => m.role === "assistant" && (m.content || "").trim());
+    const cn = t => (t || "").replace(/\s/g, "").length;
+    const lens = ai.map(m => cn(m.content));
+    const total = lens.reduce((a, b) => a + b, 0);
+    const sentences = ai.map(m => (m.content.match(/[。！？!?]/g) || []).length || 1);
+    const sTotal = sentences.reduce((a, b) => a + b, 0);
+    return {
+      replies: ai.length,
+      total,
+      avgReply: ai.length ? total / ai.length : 0,
+      avgSentence: sTotal ? total / sTotal : 0,
+      longest: lens.length ? Math.max(...lens) : 0,
+      flagged: ai.filter(m => m.warn).length,
+    };
   }
 
   function scrollDown(){ chatEl.scrollTop = chatEl.scrollHeight; }
@@ -591,14 +686,21 @@
     const delay = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
       ? 0 : (Number.isFinite(configured) ? Math.max(0, configured) : 42);
     let target = [], shown = 0, timer = null, finished = false, resolveDone;
+    // 一旦判成图案，就**整块**显示：逐字吐出来的图案中途是一堆散字符，
+    // 而且打字机的节奏是按「一句话」调的，图案不需要那个节奏。
+    let artMode = false;
     const done = new Promise(resolve => { resolveDone = resolve; });
     function tick(){
       timer = null;
-      shown = delay === 0 ? target.length : Math.min(shown + 1, target.length);
-      txtEl.textContent = target.slice(0, shown).join("");
-      txtEl.appendChild(caret);
+      if(artMode) shown = target.length;
+      else shown = delay === 0 ? target.length : Math.min(shown + 1, target.length);
+      paint(target.slice(0, shown).join(""));
       scrollDown();
       schedule();
+    }
+    function paint(content){
+      renderBlocks(txtEl, content);
+      txtEl.appendChild(caret);
     }
     function schedule(){
       if(shown < target.length && timer === null) timer = setTimeout(tick, delay);
@@ -610,6 +712,18 @@
         const probe = raw.trimStart().replace(/\s/g, "").toUpperCase();
         const text = !final && probe && "YUKI.N>".startsWith(probe) ? "" : stripPrefix(raw);
         target = Array.from(text); // 不在 emoji 的 UTF-16 代理对中间断字。
+        // 开头就看出像图案：不再逐字，直接给全（后面还有内容就继续整块给）。
+        if(!artMode && (looksLikeArtPrefix(text) || isArt(text))){ artMode = true; shown = target.length; }
+        // 图案模式下**立刻**铺上去，不等下一个 tick：等的话，流每来一块都要
+        // 空一拍才补上，看起来像先空一块再补——比逐字更难看。
+        if(artMode){
+          if(timer !== null){ clearTimeout(timer); timer = null; }
+          shown = target.length;
+          paint(target.slice(0, shown).join(""));
+          scrollDown();
+          if(finished && shown === target.length) resolveDone();
+          return;
+        }
         schedule();
       },
       finish(){ finished = true; schedule(); return done; }
@@ -668,11 +782,22 @@
         payload.api_key = settings.api_key;
         payload.model = settings.model || "deepseek-chat";
       }
+      // 记下「真的发了什么」。必须在 fetch 之前抄一份，理由见 lastSent 注释。
+      const sentSnapshot = {...payload};
+      delete sentSnapshot.api_key;
       const resp = await fetch("/api/chat", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body: JSON.stringify(payload)
       });
+      // 请求头里有上游回报的实际检索数与世界，服务端用它回答「这次到底注入了什么」。
+      lastSent = {
+        at: new Date().toISOString().slice(0, 19).replace("T", " "),
+        payload: sentSnapshot,
+        world: resp.headers && resp.headers.get ? resp.headers.get("X-Yuki-World") : "",
+        hits: resp.headers && resp.headers.get ? Number(resp.headers.get("X-Yuki-Hits") || 0) : 0,
+        status: resp.status,
+      };
 
       if(!resp.ok){
         let msg = "请求失败";
@@ -691,10 +816,10 @@
         if(on === thinking) return;
         thinking = on;
         if(on && !acc){
-          txtEl.textContent = "（思考中）";
+          renderBlocks(txtEl, "（思考中）");
           txtEl.appendChild(caret);
         }else if(!on){
-          txtEl.textContent = Array.from(stripPrefix(acc)).join("");
+          renderBlocks(txtEl, Array.from(stripPrefix(acc)).join(""));
           txtEl.appendChild(caret);
         }
       }
@@ -731,18 +856,19 @@
         reader.releaseLock();
       }
 
-      placeholder.content = stripPrefix(acc.trim() || "……");
+      // 不 trim：图案的行尾空白要留着（见 stripPrefix）。空内容才用省略号。
+      placeholder.content = stripPrefix(acc) || "……";
       typer.update(placeholder.content, true);
       await typer.finish();
-      txtEl.textContent = placeholder.content;
+      renderBlocks(txtEl, placeholder.content);
       placeholder.warn = checkReply(placeholder.content);
       applyMeta(node, placeholder);
 
     }catch(err){
-      placeholder.content = stripPrefix(acc.trim()) || "……连接失败。";
+      placeholder.content = stripPrefix(acc) || "……连接失败。";
       typer.update(placeholder.content, true);
       await typer.finish();
-      txtEl.textContent = placeholder.content;
+      renderBlocks(txtEl, placeholder.content);
       placeholder.warn = acc.trim() ? "流中断" : String(err.message || err).slice(0, 60);
       applyMeta(node, placeholder);
     }finally{
@@ -755,11 +881,236 @@
     }
   }
 
+  // 去掉模型误写的「YUKI.N>」前缀。
+  //
+  // **不 trim**：原来这里是 `.trim()`，把首行缩进一起吃掉了。
+  // 一行正文不需要缩进，看不出问题；但多行图案的左边距就是缩进，
+  // 第一行被削平之后整块图案是歪的，而且歪得很隐蔽——只有第一行。
+  // 只去掉前缀后面那一个分隔空格，其余空白原样保留（行尾空格也是排版的一部分）。
   function stripPrefix(t){
-    return String(t).replace(/^\s*YUKI\.N\s*>\s*/i, "").trim();
+    let s = String(t);
+    const m = s.match(/^[ \t\n]*YUKI\.N\s*>/i);
+    if(m){
+      s = s.slice(m[0].length);
+      if(s[0] === " ") s = s.slice(1);
+    }
+    return s.replace(/\n+$/, "").replace(/^\n+/, "");
+  }
+
+  /* ================= 字符画（CHAT-017） ================= */
+  // 判据与 textart.py 同源，两边各写一遍是 DEC-006 的要求：
+  // 前端的检测器改一边、后端没改，测试会红。这里只做「这段回复是不是图案」
+  // 和「对齐没对」，不做生成——生成方式还没定（PEND-006）。
+  const ART_MAX_WIDTH = 40;
+  const ART_SENTENCE = /[，。！？；：、…,.!?;:]/;
+  // 右边缘差多少格才算不齐（与 Python 的 _ART_EDGE_GAP 一致）。
+  const ART_EDGE_GAP = 3;
+  // 组合字符（不占格）的近似范围。**必须是一个常量，两处共用**：
+  // 原先 cellWidth 用 0300-036f + 1ab0-1aff + 20d0-20ff，而 checkArt 只查
+  // 0300-036f——于是「带希伯来元音点的行」在排版上算 0 格，在「含组合字符」
+  // 的提示上却查不出来（独立复核实测）。
+  // JS 没有 unicodedata.combining()，只能用 Unicode 区块近似；近似范围写在
+  // 这里一处，Python 那边是真判断，两者口径以此为准：本文件只保证
+  // 「自己内部的排版与提示用的是同一份」。
+  const COMBINING = /[\u0300-\u036f\u0483-\u0489\u0591-\u05bd\u05bf\u05c1-\u05c2\u05c4-\u05c5\u05c7\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06dc\u06df-\u06e4\u06e7-\u06e8\u06ea-\u06ed\u0711\u0730-\u074a\u07a6-\u07b0\u07eb-\u07f3\u0816-\u0819\u081b-\u0823\u0825-\u0827\u0829-\u082d\u0859-\u085b\u08d3-\u08e1\u08e3-\u0903\u093a-\u093c\u093e-\u094f\u0951-\u0957\u0962-\u0963\u0981-\u0983\u09bc\u09be-\u09c4\u09c7-\u09c8\u09cb-\u09cd\u09d7\u09e2-\u09e3\u0a01-\u0a03\u0a3c\u0a3e-\u0a42\u0a47-\u0a48\u0a4b-\u0a4d\u0a51\u0a70-\u0a71\u0a75\u0a81-\u0a83\u0abc\u0abe-\u0ac5\u0ac7-\u0ac9\u0acb-\u0acd\u0ae2-\u0ae3\u0b01-\u0b03\u0b3c\u0b3e-\u0b44\u0b47-\u0b48\u0b4b-\u0b4d\u0b56-\u0b57\u0b62-\u0b63\u0b82\u0bbe-\u0bc2\u0bc6-\u0bc8\u0bca-\u0bcd\u0bd7\u0c00-\u0c04\u0c3e-\u0c44\u0c46-\u0c48\u0c4a-\u0c4d\u0c55-\u0c56\u0c62-\u0c63\u0c81-\u0c83\u0cbc\u0cbe-\u0cc4\u0cc6-\u0cc8\u0cca-\u0ccd\u0cd5-\u0cd6\u0ce2-\u0ce3\u0d00-\u0d03\u0d3b-\u0d3c\u0d3e-\u0d44\u0d46-\u0d48\u0d4a-\u0d4d\u0d57\u0d62-\u0d63\u0d82-\u0d83\u0dca\u0dcf-\u0dd4\u0dd6\u0dd8-\u0ddf\u0df2-\u0df3\u0e31\u0e34-\u0e3a\u0e47-\u0e4e\u0eb1\u0eb4-\u0eb9\u0ebb-\u0ebc\u0ec8-\u0ecd\u0f18-\u0f19\u0f35\u0f37\u0f39\u0f3e-\u0f3f\u0f71-\u0f84\u0f86-\u0f87\u0f8d-\u0f97\u0f99-\u0fbc\u0fc6\u102b-\u103e\u1056-\u1059\u105e-\u1060\u1062-\u1064\u1067-\u106d\u1071-\u1074\u1082-\u108d\u108f\u109a-\u109d\u135d-\u135f\u1712-\u1714\u1732-\u1734\u1752-\u1753\u1772-\u1773\u17b4-\u17d3\u17dd\u180b-\u180d\u18a9\u1920-\u192b\u1930-\u193b\u1a17-\u1a1b\u1a55-\u1a5e\u1a60-\u1a7c\u1a7f\u1ab0-\u1abe\u1b00-\u1b04\u1b34-\u1b44\u1b6b-\u1b73\u1b80-\u1b82\u1ba1-\u1bad\u1be6-\u1bf3\u1c24-\u1c37\u1cd0-\u1cd2\u1cd4-\u1ce8\u1ced\u1cf2-\u1cf4\u1cf8-\u1cf9\u1dc0-\u1df9\u1dfb-\u1dff\u20d0-\u20f0\u2cef-\u2cf1\u2d7f\u2de0-\u2dff\u302a-\u302f\u3099-\u309a\ua66f-\ua672\ua674-\ua67d\ua69e-\ua69f\ua6f0-\ua6f1\ua802\ua806\ua80b\ua823-\ua827\ua880-\ua881\ua8b4-\ua8c5\ua8e0-\ua8f1\ua926-\ua92d\ua947-\ua953\ua980-\ua983\ua9b3-\ua9c0\ua9e5\uaa29-\uaa36\uaa43\uaa4c\uaa4d\uaa7b-\uaa7d\uaab0\uaab2-\uaab4\uaab7-\uaab8\uaabe-\uaabf\uaac1\uaaeb-\uaaef\uaaf5-\uaaf6\uabe3-\uabea\uabec-\uabed\ufb1e\ufe00-\ufe0f\ufe20-\ufe2f\ufe33-\ufe34\ufe4d-\ufe4f\uff9e-\uff9f]/;
+  function isCombining(ch){ return COMBINING.test(ch); }
+  function cellWidth(ch){
+    const o = ch.codePointAt(0);
+    // 盲文、块元素当像素用：即使「宽」字体也按 1 格算。与 Python 一致。
+    if((o >= 0x2800 && o <= 0x28FF) || (o >= 0x2580 && o <= 0x259F)) return 1;
+    if(isCombining(ch)) return 0;
+    // emoji 按 1 格：浏览器按 1 个字形排，而 Python 的 east_asian_width
+    // 对多数 emoji 返回 W（2 格）。两边口径必须一致，否则同一段文字在自检里
+    // 「是画」、在界面上「不是画」。宽度靠不靠得住另由 checkArt 报。
+    if((o >= 0x1F300 && o <= 0x1FAFF) || (o >= 0x2600 && o <= 0x27BF) || o === 0xFE0F || o === 0x200D) return 1;
+    // 东亚宽字符：CJK、全角标点、假名、谚文。用范围而不是查表，标准库在浏览器里没有。
+    return /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
+  }
+  function textWidth(line){
+    let w = 0;
+    for(const ch of line) w += cellWidth(ch);
+    return w;
+  }
+  function artSignals(line){
+    // (有没有连续 3 个符号/空格, 有没有两处以上双空格)
+    // 什么算「符号」必须和 Python 的 `_signals` 一致：
+    // 非字母数字、非宽字符、非组合字符。emoji **不算**——
+    // Python 的 `str.isalnum()` 认为 emoji 是字母数字，那边就把它当内容；
+    // 这里要是把它当符号，「🌙🌙」在两端会一个是画、一个不是。
+    let run = 0, max = 0, runSym = false, maxSym = false, symbols = 0;
+    for(const ch of line){
+      const o = ch.codePointAt(0);
+      const mark = (o >= 0x0300 && o <= 0x036f) || (o >= 0x1ab0 && o <= 0x1aff) || (o >= 0x20d0 && o <= 0x20ff);
+      // emoji 与空格一起排除：Python 那边 `str.isalnum()` 对 emoji 为真，
+      // 当它是「内容」；前端 `\p{L}`／`\p{N}` 不认 emoji，会当「符号」。
+      // 两边必须同一口径，否则「🌙🌙」在自检里不是画、界面上是画。
+      const emoji = (o >= 0x1F300 && o <= 0x1FAFF) || (o >= 0x2600 && o <= 0x27BF) || o === 0xFE0F || o === 0x200D;
+      if(ch === " " || (!emoji && !mark && !/^[\p{L}\p{N}]$/u.test(ch) && cellWidth(ch) !== 2)){
+        run++;
+        if(ch !== " ") { runSym = true; symbols++; }
+        if(run > max){ max = run; maxSym = runSym; }
+      }
+      else { run = 0; runSym = false; }
+    }
+    // 与 Python 的 `_signals` 一致：连续串里必须含**图案字符**，
+    // 光有空格不算（否则缩进两行的普通文字会被判成画）；
+    // 双空格那条也要至少有一个图案字符。
+    return [max >= 3 && maxSym, (line.match(/  /g) || []).length >= 2 && symbols >= 1];
+  }
+  function isArt(text){
+    // 判据刻意窄：平时说话被误判成画，比漏判难看得多。
+    const lines = String(text).split("\n").filter(l => l.trim());
+    if(lines.length < 2) return false;
+    if(lines.some(l => textWidth(l) > ART_MAX_WIDTH)) return false;
+    const plain = lines.filter(l => !ART_SENTENCE.test(l)).length;
+    if(plain * 2 < lines.length) return false;
+    // "u" 标志不能少：emoji 是**代理对**，没有 u 时 `[...ch]` 里拿到的是
+    // 半个代理字符，`\\p{L}` 会对它报错、`codePointAt` 也不对。
+    // 少了这个标志，「🌙🌙」在浏览器里会把整段判据抛异常——比判错更糟。
+    return lines.some(l => { const s = artSignals(l); return s[0] || s[1]; });
+  }
+  function looksLikeArtPrefix(text){
+    // 流式第一块就可能只到半行：只要眼下这几行里已经有图案迹象，就整块显示，
+    // 不要一个字一个字地吐——图案被逐字打出来，中途没法看。
+    const lines = String(text).split("\n").slice(0, 3).filter(l => l.trim());
+    if(!lines.length) return false;
+    if(lines.some(l => textWidth(l) > ART_MAX_WIDTH)) return false;
+    return lines.some(l => { const s = artSignals(l); return s[0] || s[1]; });
+  }
+  function artBlocks(text){
+    // 把回复拆成 [[是不是图案块, [行...]], ...]。与 Python 的 `art_blocks()` 逐条对应。
+    // 「图案」这个待遇（保留空白、不折行）只给图案那几行：实测汉字与 ASCII 的
+    // 宽度比是 1.66 而不是 2，整条按图案排版时文字行会被压成一行，句号都被挤下去。
+    const lines = String(text).split("\n");
+    const looks = l => !!l.trim() && textWidth(l) <= ART_MAX_WIDTH
+      && (() => { const s = artSignals(l); return s[0] || s[1]; })();
+    const blocks = [];
+    let i = 0;
+    while(i < lines.length){
+      if(!looks(lines[i])){ blocks.push([false, [lines[i]]]); i++; continue; }
+      let j = i;
+      // 连续两行以上像图案才算一块；单独一行（比如一整行 ====）仍当排版。
+      while(j + 1 < lines.length && looks(lines[j + 1])) j++;
+      if(j > i){ blocks.push([true, lines.slice(i, j + 1)]); i = j + 1; }
+      else { blocks.push([false, [lines[i]]]); i++; }
+    }
+    const merged = [];
+    for(const [kind, chunk] of blocks){
+      if(merged.length && merged[merged.length - 1][0] === kind) merged[merged.length - 1][1].push(...chunk);
+      else merged.push([kind, chunk.slice()]);
+    }
+    return merged;
+  }
+  function renderBlocks(host, text){
+    // 一个 .txt 里放若干 .blk。图案块用 .blk.art（保空白、不折行），
+    // 文字块用 .blk（正常折行）。块与块之间用 display:block 天然换行，
+    // **不插 <br>**：插了以后复制出来的文本会多出空行，而原来的换行信息
+    // 已经由块边界表达了。
+    host.textContent = "";
+    for(const [kind, chunk] of artBlocks(text)){
+      const d = document.createElement("div");
+      d.className = kind ? "blk art" : "blk";
+      d.textContent = chunk.join("\n");
+      host.appendChild(d);
+    }
+  }
+  function checkArt(text){
+    // 只查能自动判的：左边距、行尾空白、宽度不可靠的字符。
+    const probs = [];
+    const lines = String(text).split("\n");
+    const body = lines.filter(l => l.trim());
+    if(!body.length) return ["字符画里没有任何内容"];
+    const indents = [...new Set(body.map(l => l.match(/^ */)[0].length))].sort((a,b) => a-b);
+    if(indents.length > 1) probs.push(`字符画各行左边距不一致（${indents.join("/")}），图案会歪`);
+    const trailing = lines.findIndex(l => l !== l.replace(/ +$/, ""));
+    if(trailing >= 0) probs.push(`字符画第 ${trailing + 1} 行行尾有多余空格，某些字体会把后续行推歪`);
+    // 右边距：左边缘齐了、右边缘差很多，说明行宽不一致，图案会「缺一块」。
+    // 只在没有行尾空格时查（有行尾空格时上面那条更准确），与 Python 一致。
+    if(trailing < 0){
+      // 只在图案块内比，不拿文字行当参照（与 Python 一致）。
+      for(const [kind, chunk] of artBlocks(text)){
+        if(!kind) continue;
+        const rights = chunk.filter(l => l.trim()).map(textWidth);
+        if(rights.length < 2) continue;
+        const hi = Math.max(...rights), lo = Math.min(...rights);
+        if(hi - lo >= ART_EDGE_GAP){
+          probs.push(`字符画各行右边缘不齐（最宽 ${hi} 格、最窄 ${lo} 格），看着会缺一块`);
+          break;
+        }
+      }
+    }
+    for(let i = 0; i < lines.length; i++){
+      let hit = "";
+      for(const ch of lines[i]){
+        const o = ch.codePointAt(0);
+        if(isCombining(ch)){ hit = "组合字符"; break; }
+        if((o >= 0x1F300 && o <= 0x1FAFF) || (o >= 0x2600 && o <= 0x27BF) || o === 0xFE0F || o === 0x200D){
+          hit = "emoji"; break;
+        }
+      }
+      if(hit){ probs.push(`字符画第 ${i + 1} 行含 ${hit}，宽度在不同字体里不一致`); break; }
+    }
+    for(let i = 0; i < lines.length; i++){
+      const hasBraille = /[\u2800-\u28ff\u2580-\u259f]/.test(lines[i]);
+      const hasCjk = [...lines[i]].some(ch => {
+        const o = ch.codePointAt(0);
+        if((o >= 0x2800 && o <= 0x28FF) || (o >= 0x2580 && o <= 0x259F)) return false;
+        return cellWidth(ch) === 2;
+      });
+      if(hasBraille && hasCjk){
+        probs.push(`字符画第 ${i + 1} 行盲文/块元素与汉字混排，等宽字体下的宽度不可靠`);
+        break;
+      }
+    }
+    return probs;
   }
 
   /* ================= 违例检测 ================= */
+  // 括号动作的静态检查（CHAT-007）。必须与 scripts/check_persona.py
+  // ::check_action_brackets 逐条等价 —— 两处实现是同一套规则的两次独立实现，
+  // scripts/test_frontend.js 会逐例比对。改一边不改另一边，测试会红，
+  // 而且红的原因会被误读成「新规则不对」。
+  const SETTING_TERMS = [
+    "数据链", "终端界面", "人形终端", "信息统合思念体", "思念体", "统合思念体",
+    "信息流", "界面", "数据", "纳米机器", "重写", "权限", "情报",
+    "观测对象", "凉宫春日", "SOS团",
+  ];
+  function bracketSpans(text){
+    const content = []; let depth = 0, start = -1, bad = false;
+    for(let i = 0; i < text.length; i++){
+      const ch = text[i];
+      if(ch === "（"){ if(depth) bad = true; depth++; start = i; }
+      else if(ch === "）"){
+        if(depth === 0){ bad = true; continue; }
+        depth--;
+        if(depth === 0) content.push(text.slice(start + 1, i));
+      }
+    }
+    if(depth) bad = true;
+    return {content, bad};
+  }
+  function checkBrackets(text){
+    const errors = [];
+    const opens = (text.match(/（/g) || []).length;
+    const closes = (text.match(/）/g) || []).length;
+    // 只把「像动作描写」的半角括号算错：前面是汉字、里面没有 ASCII 字母数字。
+    // 「从 O(n) 降到 O(1)」这类代码、算式是正文，不能误伤。
+    const re = /(?<![\u4e00-\u9fff])\(([^()]{1,30})\)?(?=[\s。，、…）]|$)/g;
+    let m, asciiHit = null;
+    while((m = re.exec(text)) !== null){
+      if(/[\u4e00-\u9fff]/.test(m[1]) && !/[A-Za-z0-9]/.test(m[1])){ asciiHit = m[1]; break; }
+    }
+    if(asciiHit) errors.push("括号动作使用了半角 ( )，应统一为全角「（）」：（" + asciiHit + "）");
+    if(opens !== closes) errors.push("括号不配对：左括号 " + opens + " 个，右括号 " + closes + " 个");
+    const span = bracketSpans(text);
+    if(span.bad && opens === closes) errors.push("括号嵌套或错位，检测器无法配对");
+    for(const inner of span.content){
+      const term = SETTING_TERMS.find(t => inner.includes(t));
+      if(term){ errors.push("括号内含设定术语「" + term + "」——动作不能泄露设定（WORLD-001）"); break; }
+    }
+    return errors;
+  }
+
   function checkReply(text){
     const p = currentPersona();
     if(!p) return "";
@@ -774,7 +1125,16 @@
         }
       }catch(e){}
     });
-    if(/\n\s*\n/.test(text)) probs.push("分段");
+    // 分段（TERMINAL_PROMPT 第 1 条）。**例外**：字符画本来就是多行，
+    // 还常常要空行分隔文字，那不是「分段」这个违例的意思（CHAT-017 / DEC-013）。
+    // 判据用 isArt 而不是「有没有空行」：有空行的话仍然是违例。
+    if(/\n\s*\n/.test(text) && !isArt(text)) probs.push("分段");
+    // 字符画的对齐问题：错在**画**上，不是语气。排在最后，和括号规则一样，
+    // 不挤掉最常见的语气提示。
+    if(isArt(text)) for(const e of checkArt(text)) if(!probs.includes(e)) probs.push(e);
+    // 括号动作的问题排在最后：短提示先给最常见的（语气、服务话术），
+    // 而且 slice(0,2) 只显示两条，不能把主规则挤掉。
+    for(const e of checkBrackets(text)) if(!probs.includes(e)) probs.push(e);
     return probs.slice(0, 2).join(" ");
   }
 
@@ -1016,41 +1376,331 @@
     }
   }
 
-  /* ================= 校对面板 ================= */
+  /* ================= 共同经历 ================= */
+  // 记忆跟聊天记录一样**按世界分**：这里读写的都是 world 那份，切世界就换一套。
+  // 服务端也强制按 world 过滤，前端只是不把两边的记录混在一起给人看。
+
+  async function memCall(body){
+    const r = await fetch("/api/memory", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({world, ...body})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || "请求失败");
+    return d;
+  }
+
+  async function openMemory(){
+    show("memory");
+    await paintMemory();
+  }
+
+  async function paintMemory(){
+    const body = $("#mem-body");
+    $("#mem-title").textContent = "共同经历 · " + (worlds && worlds[world] ? worlds[world].name : world);
+    body.innerHTML = '<p class="note">读取中……</p>';
+    let d;
+    try{
+      const r = await fetch(`/api/memory?world=${encodeURIComponent(world)}`);
+      d = await r.json();
+      if(!r.ok) throw new Error(d.error || "读取失败");
+    }catch(e){
+      // 读不出来要明说，不能显示成「还没有任何记录」——那会让人以为记忆丢了。
+      body.innerHTML = `<p class="note">读不到记忆：${escapeHtml(e.message)}<br>主文件可能损坏，检查 data/memory/ 下的备份。</p>`;
+      return;
+    }
+    body.innerHTML = "";
+    if((d.warnings || []).length){
+      const w = document.createElement("p");
+      w.className = "note";
+      w.textContent = d.warnings.join(" / ");
+      body.appendChild(w);
+    }
+
+    const add = document.createElement("div");
+    add.className = "mem-add";
+    const inp = document.createElement("input");
+    inp.placeholder = "记一件你们两个之间的事（只写这条，不用写「她应该……」）";
+    inp.id = "mem-input";
+    const btn = document.createElement("button");
+    btn.textContent = "记下";
+    btn.onclick = async () => {
+      const text = inp.value.trim();
+      if(!text) return;
+      btn.disabled = true;
+      try{ await memCall({op:"add", text, subject:"user"}); await paintMemory(); }
+      catch(e){ alert(e.message); btn.disabled = false; }
+    };
+    inp.addEventListener("keydown", e => { if(e.key === "Enter") btn.click(); });
+    add.appendChild(inp); add.appendChild(btn);
+    body.appendChild(add);
+
+    const active = d.records.filter(r => r.status === "active").slice().reverse();
+    const retired = d.records.filter(r => r.status !== "active").slice().reverse();
+    if(!active.length) body.innerHTML += '<p class="note">还没有记下任何事。她说的话不会凭空多出记忆。</p>';
+    active.forEach(r => body.appendChild(memRow(r, false)));
+    if(retired.length){
+      const t = document.createElement("div");
+      t.className = "mem-log";
+      t.innerHTML = '<div class="t">回收站（被纠正或删掉的，不再出现在她的 prompt 里）</div>';
+      body.appendChild(t);
+      retired.forEach(r => body.appendChild(memRow(r, true)));
+    }
+
+    if((d.events || []).length){
+      const log = document.createElement("div");
+      log.className = "mem-log";
+      log.innerHTML = '<div class="t">操作记录（最近 50 条）</div>';
+      // 倒序：最近改的在上。日志是给人查「谁动了什么」用的。
+      d.events.slice().reverse().forEach(e => {
+        const row = document.createElement("div");
+        row.className = "ev";
+        const detail = e.op === "update" ? `「${e.from}」→「${e.to}」`
+          : e.op === "restore" && (e.retired_followers || []).length ? "（同时退下了更新的那条）"
+          : "";
+        row.textContent = `${e.at}  ${e.op}  ${detail}`;
+        log.appendChild(row);
+      });
+      body.appendChild(log);
+    }
+  }
+
+  function memRow(r, retired){
+    const row = document.createElement("div");
+    row.className = "mem-rec" + (retired ? " retired" : "");
+    const tx = document.createElement("div");
+    tx.className = "tx";
+    tx.textContent = r.text;
+    row.appendChild(tx);
+
+    const meta = document.createElement("div");
+    meta.className = "row2";
+    const mt = document.createElement("div");
+    mt.className = "mt";
+    const rev = r.revision > 1 ? ` · v${r.revision}` : "";
+    const by = r.revises ? ' · <span class="tag">纠正了旧的一条</span>' : "";
+    mt.innerHTML = `${escapeHtml((r.created || "").replace("T", " "))}${rev}${by}`;
+    meta.appendChild(mt);
+
+    const ops = document.createElement("div");
+    ops.className = "ops";
+    const mk = (label, title, fn) => {
+      const s = document.createElement("span");
+      s.textContent = label; s.title = title;
+      s.onclick = fn;
+      return s;
+    };
+    if(retired){
+      ops.appendChild(mk("恢复", "恢复这条；若它已被更新的一条取代，那条会退下", async () => {
+        await act(() => memCall({op:"restore", id:r.id}));
+      }));
+    }else{
+      ops.appendChild(mk("改", "改写这条的措辞（同一个事实）", async () => {
+        const v = prompt("改成：", r.text);
+        if(v === null || !v.trim()) return;
+        await act(() => memCall({op:"update", id:r.id, text:v}));
+      }));
+      // 「纠正成新事实」和「改措辞」是两件事：前者要留旧的做历史，
+      // 后者只是同一句写错了。所以纠正走 add(revises)，旧版自动进回收站。
+      ops.appendChild(mk("换成新说法", "记一条新的取代它，旧的进回收站", async () => {
+        const v = prompt("现在的说法是：", "");
+        if(v === null || !v.trim()) return;
+        await act(() => memCall({op:"add", text:v, subject:r.subject || "user", revises:r.id}));
+      }));
+      ops.appendChild(mk("删", "从她的记忆里去掉（进回收站，可恢复）", async () => {
+        await act(() => memCall({op:"delete", id:r.id}));
+      }));
+    }
+    meta.appendChild(ops);
+    row.appendChild(meta);
+    return row;
+  }
+
+  async function act(fn){
+    try{ await fn(); }
+    catch(e){ alert(e.message); }
+    await paintMemory();
+  }
+
+  /* ================= 调试面板 ================= */
+  // V-UI-02：两块必须分开写清楚——「上一次实际发送」和「下一次预览」回答的是
+  // 不同问题。改过输入框之后，预览里是改后的文本，而上一轮发出去的是改前的；
+  // 混成一块会让人以为「刚才发的是这个」。
   async function openPreflight(){
     show("preflight");
+    renderDebug();
+  }
+
+  function renderDebug(){
     const body = $("#pf-body");
+    body.innerHTML = "";
+    const w = worlds && worlds[world] ? worlds[world].name : world;
+    const s = chatStats();
+
+    const stats = document.createElement("div");
+    stats.className = "dbg-stats";
+    stats.innerHTML = s.replies
+      ? `世界 <b>${escapeHtml(w)}</b><span>回复 <b>${s.replies}</b> 条</span>
+         <span>共 <b>${s.total}</b> 字</span><span>平均 <b>${s.avgReply.toFixed(1)}</b> 字/条</span>
+         <span>平均 <b>${s.avgSentence.toFixed(1)}</b> 字/句</span><span>最长 <b>${s.longest}</b> 字</span>
+         <span>标了 △ 的 <b>${s.flagged}</b> 条</span>`
+      : `世界 <b>${escapeHtml(w)}</b><span>还没有回复。</span>`;
+    body.appendChild(stats);
+
+    body.appendChild(dbgActual());
+    body.appendChild(dbgViolations());
+    body.appendChild(dbgPreview());
+  }
+
+  // 上一轮实际发送。和预览的区别是它有确定的 payload 快照。
+  function dbgActual(){
+    const box = document.createElement("div");
+    const sec = document.createElement("div");
+    sec.className = "dbg-sec";
+    sec.textContent = "上一次实际发送";
+    box.appendChild(sec);
+    if(!lastSent){
+      const p = document.createElement("p");
+      p.className = "note";
+      p.textContent = "这次会话还没有发出过请求。下面只有「下一次预览」。";
+      box.appendChild(p);
+      return box;
+    }
+    const p = lastSent.payload;
+    const head = document.createElement("div");
+    head.className = "note";
+    head.innerHTML = `${escapeHtml(lastSent.at)} · 世界 ${escapeHtml(p.world)} ·
+      模型 ${escapeHtml(p.model || "（未指定）")} · 温度 ${escapeHtml(String(p.temperature))} ·
+      上限 ${escapeHtml(String(p.max_tokens))} token ·
+      历史 ${escapeHtml(String((p.history || []).length))} 条 ·
+      请求检索 ${escapeHtml(String(p.k))} 条，服务端回报命中 ${escapeHtml(String(lastSent.hits))} 条 ·
+      HTTP ${escapeHtml(String(lastSent.status))}`;
+    box.appendChild(head);
+
+    const q = document.createElement("div");
+    q.className = "dbg-msg";
+    q.innerHTML = '<div class="who">当时发出去的这句话</div>' +
+      `<div class="bod">${escapeHtml(p.message || "")}</div>`;
+    box.appendChild(q);
+
+    const segs = (p.history || []).slice(-6);
+    if(segs.length){
+      const his = document.createElement("div");
+      his.className = "dbg-msg";
+      his.innerHTML = '<div class="who">随请求带上的最近历史（旧 → 新，最多显示 6 条）</div>' +
+        segs.map(m => `<div class="bod">${m.role === "user" ? "你" : "她"}：${escapeHtml(m.content)}</div>`).join("");
+      box.appendChild(his);
+    }
+    return box;
+  }
+
+  // 逐条校对信息（CHAT-006 要移进来的东西）：哪几条被标了 △、为什么。
+  function dbgViolations(){
+    const box = document.createElement("div");
+    const sec = document.createElement("div");
+    sec.className = "dbg-sec";
+    sec.textContent = "违例与告警";
+    box.appendChild(sec);
+    const flagged = hist[world].filter(m => m.role === "assistant" && m.warn);
+    if(!flagged.length){
+      const p = document.createElement("p");
+      p.className = "note";
+      p.textContent = "这一轮没有违例，也没有流中断。";
+      box.appendChild(p);
+      return box;
+    }
+    flagged.forEach(m => {
+      const d = document.createElement("div");
+      d.className = "dbg-msg";
+      d.innerHTML = `<div class="who dbg-wing">△ ${escapeHtml(m.warn)}</div>` +
+        `<div class="bod">${escapeHtml((m.content || "").slice(0, 120))}</div>`;
+      box.appendChild(d);
+    });
+    return box;
+  }
+
+  // 下一次预览：拿当前输入框的内容重新组装。这一块不调用模型、不花钱。
+  function dbgPreview(){
+    const box = document.createElement("div");
+    const sec = document.createElement("div");
+    sec.className = "dbg-sec";
+    sec.textContent = "下一次预览（用当前输入框的内容重新组装，不调用模型）";
+    box.appendChild(sec);
+
     const text = inputEl.value.trim();
-    if(!text){ body.innerHTML = '<span class="note">先在输入框里写一句话，再点这里。</span>'; return; }
-    body.innerHTML = '<p class="note">正在组装……（这一步不花钱，不调用模型）</p>';
-    try{
-      const r = await fetch("/api/preview", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({world, message:text, history:historyForApi()})
-      });
-      const d = await r.json();
-      if(!r.ok){ body.innerHTML = `<p class="note">${escapeHtml(d.error || "失败")}</p>`; return; }
-      body.innerHTML = "";
+    if(!text){
+      const p = document.createElement("p");
+      p.className = "note";
+      p.textContent = "输入框是空的。写一句话再回来看这一块。";
+      box.appendChild(p);
+      return box;
+    }
+    const tip = document.createElement("p");
+    tip.className = "note";
+    tip.textContent = "注意：这是「如果现在发」的样子，不是上面那次实际发送的内容。";
+    box.appendChild(tip);
+
+    const holder = document.createElement("div");
+    holder.textContent = "正在组装……";
+    holder.className = "note";
+    box.appendChild(holder);
+
+    fetch("/api/preview", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({world, message:text, history:historyForApi()})
+    }).then(r => r.json().then(d => ({ok:r.ok, d}))).then(({ok, d}) => {
+      if(!ok){
+        holder.textContent = d.error || "组装失败";
+        return;
+      }
+      holder.remove();
       const pre = document.createElement("pre");
       pre.className = "prompt";
       pre.textContent = d.system_prompt;
-      body.appendChild(pre);
+      box.appendChild(pre);
 
       const hits = document.createElement("div");
       hits.className = "hits";
-      hits.innerHTML = `<div class="t">本次注入的原作记录（${d.hits.length} 条 · 共 ${d.message_count} 条消息）</div>`;
+      hits.innerHTML = `<div class="t">会注入的原作记录（${d.hits.length} 条 · ` +
+        `共同经历 ${d.memory_count || 0} 条 · 共 ${d.message_count} 条消息）</div>`;
       d.hits.forEach((h, i) => {
         const d2 = document.createElement("div");
         d2.className = "hit";
-        d2.innerHTML = `<b>${i + 1}</b> <span class="${h.world === world ? "" : "cr"}">${h.world === world ? "" : "〔另一世界〕"}</span> ${escapeHtml(h.ep_title)} ${escapeHtml(h.start)} · ${h.score}<br>${escapeHtml(h.text)}`;
+        d2.innerHTML = `<b>${i + 1}</b> ` +
+          `<span class="${h.world === world ? "" : "cr"}">${h.world === world ? "" : "〔另一世界〕"}</span> ` +
+          `${escapeHtml(h.ep_title)} ${escapeHtml(h.start)} · ${h.score}<br>${escapeHtml(h.text)}`;
         hits.appendChild(d2);
       });
       if(!d.hits.length) hits.innerHTML += '<div class="hit">没有命中。她会凭人格回答，不会有原作依据。</div>';
-      body.appendChild(hits);
-    }catch(e){
-      body.innerHTML = '<p class="note">组装失败。</p>';
-    }
+      box.appendChild(hits);
+
+      // 场景状态（CHAT-013）：她这侧「此刻」记着什么。
+      // 摆在预览末尾而不是最前，是因为它是附带信息；但必须能看见——
+      // 状态错了（比如用户说「我摘了眼镜」却改了她的设定）只能靠这里发现。
+      //
+      // 用「戴着眼镜 / 没有戴眼镜」这类**完整说法**，不写「眼镜：是/否」：
+      // 「眼镜：否」看一眼分不清是「缺眼镜」还是「没戴眼镜」，这种含糊在核对
+      // 状态时会直接导致误判——而这块存在的唯一理由就是核对。
+      const sc = document.createElement("div");
+      sc.className = "hits";
+      const LABEL = {
+        glasses: {true: "戴着眼镜", false: "没有戴眼镜"},
+        book: {true: "手里那本书是打开的", false: "书是合上的"},
+        together: {true: "你们在同一个空间", false: "隔着终端，不在同一空间"},
+      };
+      const ORDER = ["glasses", "book", "together"];
+      const known = d.scene_state || {};
+      const rows = ORDER
+        .filter(k => k in known && known[k] !== null && known[k] !== undefined)
+        .map(k => LABEL[k][known[k] === true]);
+      sc.innerHTML = `<div class="t">此刻记录的状态（${rows.length} 项）</div>` +
+        (rows.length
+          ? `<div class="hit">${rows.join(" · ")}</div>`
+          : '<div class="hit">没有任何记录。她不会替这些编一个。</div>');
+      box.appendChild(sc);
+    }).catch(() => { holder.textContent = "组装失败。"; });
+    return box;
   }
 
   /* ================= 事件 ================= */
@@ -1065,6 +1715,7 @@
 
   $("#open-settings").onclick = openSettings;
   $("#open-corpus").onclick = openCorpus;
+  $("#open-memory").onclick = openMemory;
   $("#open-preflight").onclick = openPreflight;
 
   document.querySelectorAll("[data-close]").forEach(b => {

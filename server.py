@@ -24,6 +24,8 @@ server.py — YUKI.N> 终端（两个世界 · 一个她）
     GET  /api/worlds           世界线元信息 + 语料统计
     GET  /api/backends         本机可用的可选后端 (例如 Qoder 桥)
     GET  /api/corpus?ep=03     资料终端: 按集翻原文
+    GET  /api/memory?world=…   共同经历: 列出本世界记录与操作日志 (CHAT-018)
+    POST /api/memory           共同经历: add / update / delete / restore
     POST /api/preview          看这次请求真正发出去的 prompt (不花钱)
     POST /api/chat             对话, SSE 流式透传
 """
@@ -49,7 +51,10 @@ QODER_STATE = Path.home() / ".dsh" / "qoder-backend" / "state.json"
 QODER_PROVIDER = "qoder"
 
 sys.path.insert(0, str(ROOT))
+import memory as memory_mod  # noqa: E402
 import prompt_builder as pb  # noqa: E402
+import scene as scene_mod  # noqa: E402
+import textart  # noqa: E402
 from retriever import Corpus  # noqa: E402
 
 MIME = {
@@ -70,6 +75,61 @@ OPENER = (urllib.request.build_opener() if USE_ENV_PROXY
           else urllib.request.build_opener(urllib.request.ProxyHandler({})))
 
 CORPUS = None  # 延迟加载
+MEMORY_DIR = ROOT / "data" / "memory"
+
+
+def memory_store(world: str) -> memory_mod.MemoryStore:
+    """按世界取记忆库。世界在对象建好时就绑死，调用方漏传也拿不到别的世界。
+
+    `MEMORY_DIR` 每次现读模块变量，测试才能把它指到临时目录；
+    写成默认参数就会在导入时固化，测试会写进真实数据目录。
+    """
+    return memory_mod.MemoryStore(root=MEMORY_DIR, world=world)
+
+
+def memory_read(query: str, world: str, k: int = 4) -> list[dict]:
+    """取本次对话要注入的共同经历。检索失败**不阻断**对话。
+
+    宁可这一轮没有记忆，也不要因为一个坏掉的 JSON 让用户打不开聊天窗口。
+    折中方案：「本世界最近几条 active」在 read() 里兜底，见 memory.py。
+    """
+    try:
+        return memory_store(world).read(query, k=k)
+    except Exception as e:
+        sys.stderr.write(f"[server] 记忆不可用（本轮按无记忆处理）: {e}\n")
+        return []
+
+
+def scene_turn(user_text: str, world: str, commit: bool = True) -> tuple[str, dict]:
+    """读这一轮的场景状态：先按用户这句话更新，再渲染成给模型看的几行。
+
+    为什么要先更新再渲染，而不是只渲染：状态是由**这一轮这句话**决定的。
+    「（把眼镜摘下来）」发过来的那一轮，她就该是不戴眼镜的状态，
+    而不是等下一轮才生效。
+
+    `commit=False` 时只在副本上试算，**不写回真实状态**。
+    `/api/preview` 必须走这条路：预览是「如果现在发会怎样」的假设，
+    用户点开调试面板看一眼、什么也没发就关掉，不该让她真的摘下眼镜。
+    这个 bug 是真出现过的——预览一次，「（把眼镜摘下来）我在活动室了」
+    就永久生效了。
+
+    为什么失败不抛：状态是锦上添花，拼错了不该让对话打不开。
+    出问题时按「没有状态」处理——**少说一句，好过说错一句**。
+    """
+    try:
+        if commit:
+            scene_mod.REGISTRY.update_from(world, user_text)
+            scene = scene_mod.REGISTRY.get(world)
+            return scene.render(), scene.known()
+        # 试算：拷一份状态，在副本上更新，只用来组装预览。
+        probe = scene_mod.Scene(world)
+        probe.state.update(scene_mod.REGISTRY.get(world).known())
+        probe.update_from(user_text)
+        # 返回试算结果，**不写回** REGISTRY。
+        return probe.render(), probe.known()
+    except Exception as e:
+        sys.stderr.write(f"[server] 场景状态不可用（本轮按无状态处理）: {e}\n")
+        return "", {}
 
 
 def load_corpus() -> Corpus:
@@ -143,6 +203,13 @@ def probe_qoder_backend() -> dict:
     except Exception as e:
         out["reason"] = f"连不上桥：{e}"
     return out
+
+
+def _world_arg(raw: str) -> str | None:
+    """校验界面传来的世界名。**不接受空值回退**：写记忆时静默落到 normal，
+    就等于把崩溃世界的经历记进主线（WORLD-001）。读也一样，报错比猜安全。
+    """
+    return raw if raw in pb.WORLD_META else None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -219,6 +286,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.json_err(404, f"没有这一集: {ep}")
             return self.send_json(corpus.episode(ep, offset, limit))
 
+        if path == "/api/memory":
+            qs = parse_qs(u.query)
+            world = _world_arg((qs.get("world") or ["normal"])[0])
+            if world is None:
+                return self.json_err(400, "world 必须是 normal 或 crash")
+            try:
+                records, warns = memory_store(world).load()
+            except memory_mod.MemoryError_ as e:
+                # 记忆文件坏了要说出来，不能让界面显示成「一条记忆都没有」。
+                return self.send_json({"world": world, "records": [], "events": [],
+                                       "error": str(e)}, 500)
+            return self.send_json({
+                "world": world,
+                "records": records,
+                "events": memory_store(world).log_events(50),
+                "warnings": warns,
+            })
+
         if path == "/favicon.ico":
             path = "/favicon.svg"   # 浏览器兜底会请求 .ico, 指到同一个图标
         if path in ("/", "/index.html"):
@@ -254,12 +339,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/preview":
             return self.api_preview(req)
+        if path == "/api/memory":
+            return self.api_memory(req)
         if path != "/api/chat":
             return self.send_error(404, "Not Found")
         return self.api_chat(req)
 
-    def _compose(self, req):
-        """把请求组装成上游 payload, 同时返回检索到的剧情。"""
+    def api_memory(self, req):
+        """共同经历的增删改查（CHAT-018）。
+
+        `world` 是**必填**的，不从上下文推断：这里没有会话，猜错就是把两个世界的
+        经历混在一起。前端每次请求都带着当前世界。
+        """
+        world = _world_arg(req.get("world") or "")
+        if world is None:
+            return self.json_err(400, "world 必须是 normal 或 crash")
+        op = (req.get("op") or "").strip()
+        store = memory_store(world)
+        try:
+            if op == "add":
+                rec, warns = store.add(
+                    req.get("text") or "",
+                    subject=req.get("subject") or "user",
+                    source={"kind": "manual"},
+                    tags=req.get("tags") or [],
+                    revises=(req.get("revises") or None),
+                )
+            elif op == "update":
+                rec, warns = store.update(req.get("id") or "", req.get("text") or "")
+            elif op == "delete":
+                rec, warns = store.delete(req.get("id") or "")
+            elif op == "restore":
+                rec, warns = store.restore(req.get("id") or "")
+            else:
+                return self.json_err(400, f"未知操作 {op!r}；只接受 add/update/delete/restore")
+        except memory_mod.MemoryError_ as e:
+            # 记录不存在、内容为空、跨世界 —— 都是调用方的问题，不是服务端崩了。
+            return self.json_err(400, str(e))
+        return self.send_json({"world": world, "op": op, "record": rec, "warnings": warns})
+
+    def _compose(self, req, commit_scene: bool = True):
+        """把请求组装成上游 payload, 同时返回检索到的剧情。
+
+        `commit_scene=False` 给预览用：算出「如果现在发会怎样」，
+        但不把这次的结果写进真实的场景状态。
+        """
         world = req.get("world") or "normal"
         if world not in pb.WORLD_META:
             world = "normal"
@@ -279,15 +403,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             hits = []
             sys.stderr.write(f"[server] 检索不可用: {e}\n")
 
+        memories = memory_read(user_text, world)
+        # 状态块与状态快照一次算出来，保证「显示的」和「注入的」是同一份。
+        scene_block, scene_snapshot = scene_turn(user_text, world,
+                                                 commit=commit_scene)
+
         cards = load_personas()
         if not cards:
             raise RuntimeError("personas 目录里没有可用的人格卡")
         persona = pb.persona_for(cards, world)
 
-        messages = pb.build_messages(persona, world, hits, history, user_text)
+        messages = pb.build_messages(persona, world, hits, history, user_text,
+                                     memories=memories, scene=scene_block)
+
+        # 按世界给的**格式约定**：字符画只在崩溃世界放开（DEC-013）。
+        # 主线世界还写着「不要分段」，所以那边 kind 恒为 chat——
+        # 界面据此决定要不要保空白，不用自己再猜一遍规则。
+        art_allowed = pb.ART_ALLOWED_WORLDS.get(world, False)
 
         return {
             "world": world,
+            "kind": "chat" if art_allowed else "plain",
+            "memory_count": len(memories),
+            # 预览时给的是**试算后**的状态，和 system 里那一块保持一致；
+            # 读全局状态会让「面板显示的」和「实际注入的」对不上。
+            "scene_state": scene_snapshot,
             "persona_id": persona.get("id"),
             "messages": messages,
             "hits": [
@@ -299,7 +439,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def api_preview(self, req):
         try:
-            out = self._compose(req)
+            # 预览不写状态：点一下调试面板不该改变她的眼镜和场景。
+            out = self._compose(req, commit_scene=False)
         except (ValueError, RuntimeError) as e:
             return self.json_err(400, str(e))
         out["system_prompt"] = out["messages"][0]["content"]

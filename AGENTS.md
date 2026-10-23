@@ -1,7 +1,7 @@
 # AGENTS.md · 开发与协作约定
 
 > 给接手这个项目的开发者或 AI。**动手之前读完这一页**。
-> 最近更新：2026-10-21
+> 最近更新：2026-10-23
 
 ---
 
@@ -45,6 +45,9 @@
 | `docs/STATUS.md` | 阶段、任务状态、阻塞、下一步 | 每完成一批实际工作时 |
 | `docs/DECISIONS.md` | 重要决定及原因 | 出现影响后续开发的选择时 |
 | `docs/VALIDATION.md` | 验收场景、测试方法、验证结果 | 行为规则或验证结果变化时 |
+| `docs/SOURCES.md` | 示例来源标签的**逐条依据**（哪个能定位到原句、哪个只是解读） | 增删示例或改 `source` 标签时 |
+| `docs/reviews/` | 独立审阅与缺陷复现记录（复现方式、实测结果、**没修也要写清**） | 每次审阅或复现出缺陷时 |
+| `docs/pending/DECISIONS-NEEDED.md` | 需要人拍板的事、我暂用的默认、影响面 | 每次遇到需要授权的问题时 |
 | `data/README.md` | 数据来源、分级、准入、复核要求 | 数据处理规则变化时 |
 
 `README` 与 `PLAN` 是**分工关系，不是互相取代**：前者说「现在能跑什么」，后者说「要迁到哪、怎么迁」。
@@ -68,25 +71,37 @@
 
 ### 2. 有些测试是故意锁住当前行为的
 
-`scripts/test_backend.py::test_05_cross_world_preview` 现在断言 prompt **必须**出现跨世界标签。这是为了固定当时的泄漏机制，不是 bug。
-改行为时要**显式重写**它，不能删掉了事。删掉的测试不会告诉你哪里退化。
+**这条原来举的例子已经过期，改写成真实情况，并保留原因**：原来的
+`test_05_cross_world_preview` 断言 prompt **必须**出现跨世界标签（`〔未被修改的时间线〕`、`【跨世界】`），
+用来固定当时的泄漏机制。WORLD-001 落地后，这个用例被**显式改写**为
+`test_05_cross_world_isolation`，断言反转成 `assertNotIn`——旧标记**一律不许出现**。
+
+这就是「显式重写」的意思：反转一个锁行为的测试时，把旧断言和新理由写在同一个地方，
+而不是删掉了事。删掉的测试不会告诉你哪里退化。
+
+现在仍然属于这一类的是 `test_08`：它断言 `max_chars_*` / `tech_keywords` **不存在**（DEC-001 已删除字数上限）。
+将来若要恢复任何字数限制，必须先改 DEC-001，再显式重写 `test_08`，不能直接把字段加回去。
 
 ### 3. 不要用工程测试评价人设
 
 自动测试只证明代码正确，不证明她像不像。二者见 [VALIDATION.md](docs/VALIDATION.md) 的证据分级。
-「37 项通过」不构成「她说话自然」的证据。
+当前是「后端 53 项通过」这样的数字，但它**不构成**「她说话自然」的证据。
+写结论时请照抄 [VALIDATION.md](docs/VALIDATION.md) 里的证据等级（A/B/C/D），不要自创说法。
 
 ---
 
 ## 五、验证要求
 
-每完成一批改动，跑完这四项再报完成：
+每完成一批改动，跑完这几项再报完成：
 
 ```powershell
 py build_corpus.py            # 语料与归属
 py scripts/check_persona.py   # 人格卡自检
 node scripts/test_frontend.js # 前端 + HTTP 全链路
 py scripts/test_backend.py    # 后端与检索
+py scripts/test_scene.py      # 场景状态（CHAT-013）
+py scripts/test_textart.py    # 字符画（CHAT-017：宽度口径 / 成画 / 对齐 / 分块 / 前缀剥离）
+py scripts/verify_sources.py  # verified: 标签逐字核对（AUD-10）
 ```
 
 全绿才算完成。红了先修再继续，不要为了通过而放宽断言。
@@ -97,7 +112,7 @@ py scripts/test_backend.py    # 后端与检索
 
 ## 六、完成一个任务的检查清单
 
-- [ ] 代码改完，四项回归全绿
+- [ ] 代码改完，第五节那七项全绿
 - [ ] [docs/STATUS.md](docs/STATUS.md) 对应任务的状态已更新（`待开发` → `已实现`）
 - [ ] [docs/PRODUCT.md](docs/PRODUCT.md) 规则是否需要改？改了就在 [docs/DECISIONS.md](docs/DECISIONS.md) 留原因
 - [ ] [docs/VALIDATION.md](docs/VALIDATION.md) 是否需要新增验收场景或更新结果
@@ -127,12 +142,14 @@ character-voice/
 ├── server.py          本地服务：静态文件 + 检索 + 组装 prompt + SSE 透传
 ├── build_corpus.py    建检索索引（data/parsed → data/index）
 ├── retriever.py       BM25 检索
+├── scene.py           场景状态（眼镜 / 书 / 是否同处一室）
+├── textart.py         字符画：宽度口径、成画判定、对齐检查、分块、前缀剥离（CHAT-017）
 ├── prompt_builder.py  人格卡 + 世界线 + 检索结果 → messages
 ├── personas/          两张人格卡（主线 / 崩溃）
 ├── web/index.html     界面（单文件，无构建）
 ├── docs/              产品规则、状态、决策、验收
 ├── data/              语料、索引、分级规则（见 data/README.md）
-├── scripts/           构建、自检、回归、标注工具
+├── scripts/           构建、自检、回归、标注工具（verify_sources.py 核对示例来源）
 └── app/  config/      旧引擎，不参与运行，仅供参考
 ```
 
