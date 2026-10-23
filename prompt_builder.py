@@ -95,6 +95,9 @@ ART_ALLOWED_WORLDS = {"normal": False, "crash": True}
 ART_PROMPT = """【可以画】
 你这个世界的通讯能显示多行的字符画：用 ASCII 符号、Unicode 线条、盲文点阵或方块拼出来的小图案。
 - 想画就画，不想画就只说话。**只说话永远是正常选择**，不画才是大多数时候的样子。
+- **格式上的例外，只针对图案本身**：上面那条「不要分段、不要空行」说的是**文字**。
+  图案块可以占好几行、行与行之间可以有空行；**图案以外的文字部分仍然不分段**，
+  照旧一段说完就停。这两条不冲突，冲突时以「图案归图案、文字归文字」为准。
 - 画的时候，图案单独占几行，文字写在图案下面，不要混在一行里。
 - 一行里只用等宽字符，靠空格对齐；不要用 emoji、不要用中文标点排图。
 - 图案要小，几行就够。整条消息不要超过十几行。
@@ -129,6 +132,45 @@ SHARED_MEMORY_PROMPT = """【你和对方之间发生过的事】
 - 记录里没有的事就是没发生。不要替它补细节，也不要把原作剧情说成和你一起经历过的。"""
 
 
+#: 共同经历里的「主体」怎么写成给模型看的一句话。
+#:
+#: 为什么必须有这个（R-07）：同一句「不吃香菜」，是**对方**说过、还是
+#: **她自己**的事，对她的影响完全不同——前者是「你记得我」，后者是
+#: 「我记得你」。原来两者都渲染成 `[1] 日期 · 不吃香菜`，模型只能猜。
+SUBJECT_LABEL = {
+    # 用户的事：用第二人称写，模型读起来就是「对方的事」。
+    "user": "对方",
+    # 她自己的事：用第一人称写。
+    "yuki": "你",
+    # 两个人一起经历的：不归给任何一方。
+    "together": "你们一起",
+    # 世界观层面的设定（不是谁的私事）。
+    "world": "这边的事",
+}
+
+#: 来源怎么标。只标**需要模型打折扣**的那几种：
+#: - `manual` / `user-stated` 是用户亲口说的，按事实用，不额外标注；
+#: - `summary` 是模型自己总结出来的，可能失真，必须标出来；
+#: - `inferred` 是推出来的，同样要标。
+#:
+#: 不标「用户说的」不是省事：满屏都是标注反而会让模型把它当成免责声明，
+#: 真正需要小心的那种（摘要）就淹没在里面了。
+SOURCE_MARK = {
+    "summary": "（由对话摘要而来，可能不准确，不要当成她亲口说过）",
+    "inferred": "（推断，不是明确说过）",
+    "model": "（由对话摘要而来，可能不准确，不要当成她亲口说过）",
+}
+
+
+def _source_kind(record: dict) -> str:
+    src = record.get("source")
+    if isinstance(src, dict):
+        return str(src.get("kind") or "").strip().lower()
+    if isinstance(src, str):
+        return src.strip().lower()
+    return ""
+
+
 def render_shared_memory(records: list[dict], world: str, max_chars: int = 1200) -> str:
     """把共同经历排成给模型看的块（CHAT-016）。
 
@@ -138,6 +180,10 @@ def render_shared_memory(records: list[dict], world: str, max_chars: int = 1200)
     与 `render_hits()` 的区别是**来源分开**：原作片段放
     「=== 原作记录 ===」块，共同经历放「=== 共同经历 ===」块。
     两者混在一起，模型会把剧情台词当成自己经历过的事（CHAT-016 明令禁止）。
+
+    **每条都要带主体与来源**（R-07）：`[1] 2026-10-20 · 对方：不吃香菜`
+    而不是 `[1] 2026-10-20 · 不吃香菜`。没有主体的记忆会让模型分不清
+    「你记得我」和「我记得你」；来源是摘要时还要加一句「可能不准确」。
     """
     if not records:
         return ""
@@ -148,7 +194,9 @@ def render_shared_memory(records: list[dict], world: str, max_chars: int = 1200)
         if r.get("status") not in (None, "active"):
             continue
         when = (r.get("created") or "")[:10]
-        block = f"[{i}] {when} · {r.get('text', '')}"
+        subject = SUBJECT_LABEL.get(str(r.get("subject") or "user").lower(), "对方")
+        mark = SOURCE_MARK.get(_source_kind(r), "")
+        block = f"[{i}] {when} · {subject}：{r.get('text', '')}{mark}"
         if used + len(block) > max_chars:
             break
         out.append(block)
@@ -163,6 +211,43 @@ def strip_prefix(text: str) -> str:
     return t.strip()
 
 
+def filter_ctx_by_world(ctx: str, ctx_worlds: list[str] | None, world: str,
+                        keep_center: bool = True) -> str:
+    """把上下文窗口裁成只剩当前世界的行（R-01 / WORLD-001-B）。
+
+    为什么必须逐行裁：每条记录的 `ctx` 是前后各 5 句拼起来的窗口，窗口会
+    跨过世界切点。《消失》切点附近实测有 10 个窗口、30 行上下文属于另一世界，
+    其中 `消失:535`（normal，0:37:54）的窗口里就含有 `0:38:13` 那一行
+    —— 那是崩溃世界的。只按 `h["world"]` 过滤，这一行照样会进 prompt。
+
+    参数 `ctx_worlds` 由 `build_corpus.py` 写入，长度与 `ctx` 的行数一一对应。
+    拿不到标注时（旧索引、外部索引）**保守处理**：只保留中心行。
+    少给几行依据好过给错依据——CHAT-013 的「拿不准就不更新」是同一个道理。
+
+    `keep_center=False` 用于检索文本：那种文本不需要 `▶` 标记。
+    """
+    lines = (ctx or "").splitlines()
+    if not lines:
+        return ""
+    if not ctx_worlds or len(ctx_worlds) != len(lines):
+        # 没有逐行标注：只留中心行。中心行属于当前世界由调用方保证。
+        for line in lines:
+            if line.strip().startswith("▶"):
+                return line.replace("▶", "").strip() if not keep_center else line
+        return ""
+
+    kept = [line for line, w in zip(lines, ctx_worlds) if w == world]
+    if not keep_center:
+        return "\n".join(kept)
+    # 中心行必须留下，否则这块只剩上下文，模型会以为是别人说的话。
+    center = next((ln for ln in lines if ln.strip().startswith("▶")), None)
+    if center is not None and center not in kept:
+        # 中心行属于另一世界，说明这条记录不该被注入。调用方按 world 过滤过，
+        # 走到这里意味着标注与记录本身不一致 —— 宁可不给。
+        return ""
+    return "\n".join(kept)
+
+
 def render_hits(hits: list[dict], world: str, max_chars: int = 2200) -> str:
     """把检索结果排成给模型看的原文块。
 
@@ -171,6 +256,9 @@ def render_hits(hits: list[dict], world: str, max_chars: int = 2200) -> str:
     另一世界的片段不标注、不降权，直接不出现 —— 标注本身就是暗示，
     「〔未被修改的时间线〕」这种字样会让模型知道自己看到了不该看的东西。
     归属未知（world 不是两端之一）的也不输出：宁可没有依据，也不给错的依据。
+
+    **上下文行同样逐行过滤**（R-01）：只按 `h["world"]` 过滤挡不住窗口
+    跨过世界切点的那几行。见 `filter_ctx_by_world()`。
     """
     if not hits:
         return ""
@@ -179,9 +267,13 @@ def render_hits(hits: list[dict], world: str, max_chars: int = 2200) -> str:
     for h in hits:
         if h.get("world") != world:
             continue
+        ctx = filter_ctx_by_world(h.get("ctx", ""), h.get("ctx_worlds"), world)
+        if not ctx:
+            # 裁完什么都不剩：这条记录没有本世界的依据，整条不注入。
+            continue
         i = len(out) + 1
         ep = h.get("ep_title") or h["ep"]
-        block = f"[{i}] {ep} · {h['start']}\n{h['ctx']}"
+        block = f"[{i}] {ep} · {h['start']}\n{ctx}"
         if used + len(block) > max_chars:
             break
         out.append(block)

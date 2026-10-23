@@ -39,18 +39,44 @@ js = js.slice(0, cut) + `
 // mkEl 既要能当「按选择器缓存」的固定节点，也要能当 createElement 的产物。
 // 这里退掉一层：每次 createElement 都有独立的 children，
 // 于是面板渲染出来的结构能被断言，而不是所有节点共享同一个数组。
+//
+// **innerHTML 必须模拟「重建子节点」**（R-02）。真实浏览器里给 innerHTML
+// 赋值会把已有子节点全部丢掉，原来绑在这些节点上的 onclick / keydown 也跟着
+// 丢失。第一版 harness 把 innerHTML 当成一段死文本、children 只增不减，
+// 于是 `paintMemory()` 里「先 createElement 绑定事件、再 body.innerHTML += …」
+// 这种把处理器冲掉的写法**永远测不出来**——真实浏览器里空记忆库的第一条
+// 就是因此存不进去的。现在赋值即清空，并记下被丢弃的节点，
+// 便于用例直接断言「某某节点的处理器被冲掉了」。
 function mkEl() {
   const selectors = new Map(), classes = new Set();
-  return {
+  const self = {
     textContent: '', innerHTML: '', value: '', className: '', dataset: {}, children: [],
     disabled: false, scrollHeight: 0, id: '',
+    // 被 innerHTML 赋值冲掉的子节点（只供测试观察，真实 DOM 里它们就是没了）。
+    discarded: [],
     style: {setProperty(k, v) { this[k] = v; }},
     classList: {add: k => classes.add(k), remove: k => classes.delete(k),
       toggle() {}, contains: k => classes.has(k)},
-    appendChild(c) { this.children.push(c); return c; }, remove() {},
+    appendChild(c) { this.children.push(c); return c; },
+    remove() {},
     querySelector(s) { if (!selectors.has(s)) selectors.set(s, mkEl()); return selectors.get(s); },
     addEventListener() {}, focus() {}, click() { if (this.onclick) return this.onclick(); },
   };
+  // 用存取器拦下赋值：真实 DOM 里 innerHTML 一赋值，子节点就全没了。
+  let html = '';
+  Object.defineProperty(self, 'innerHTML', {
+    get() { return html; },
+    set(v) {
+      // `+=` 会先读再写，读到的是旧 html —— 但这不影响「重建」这个关键语义：
+      // 只要发生赋值，所有已挂上的子节点与它们的处理器都会消失。
+      self.discarded.push(...self.children);
+      self.children.length = 0;
+      html = String(v);
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  return self;
 }
 
 // 把一棵 mkEl 树的文字拼起来。面板用 appendChild 建 DOM，
@@ -691,15 +717,14 @@ print(json.dumps([[t.is_art(x), t.check_art(x), t.text_width(x), t.art_blocks(x)
     mem.T.switchWorld('normal', {silent: true});
     mem.els.get('#mem-body').children.length = 0;
     await mem.T.paintMemory();
-    const input = findByClass(mem.els.get('#mem-body'), '')
-      .find(n => n.id === 'mem-input') || null;
-    // 面板里那个输入框是 createElement 出来的（harness 不解析 innerHTML），
-    // 按 id 找不到就按位置取第一个 input。
-    const inp = input || mem.els.get('#mem-body').children.find(c => c.className === 'mem-add').children[0];
+    const addRow = mem.els.get('#mem-body').children.find(c => c.className === 'mem-add');
+    // 新增区顺序固定：主体下拉 / 输入框 / 「记下」按钮（主体是 R-07 加的）。
+    const inp = addRow.children[1];
     inp.value = '  你换了个发型 ';
-    const addBtn = mem.els.get('#mem-body').children.find(c => c.className === 'mem-add').children[1];
+    const addBtn = addRow.children[2];
     await addBtn.onclick();
     const posted = mem.state.memPosts.at(-1);
+    // 默认主体是「对方的事」，所以 subject 仍是 user。
     assert.deepEqual(posted, {world: 'normal', op: 'add', text: '你换了个发型', subject: 'user'},
       JSON.stringify(posted));
     ok(true, '面板新增记忆：带 world 与 op，文本去空白');
@@ -722,16 +747,145 @@ print(json.dumps([[t.is_art(x), t.check_art(x), t.text_width(x), t.art_blocks(x)
     ok(true, '「换成新说法」提交 add+revises，不会覆盖掉旧记录');
 
     // 服务端拒绝时：弹出来，不要静默当作成功。
+    //
+    // 这里的形状改过一次：原版让 GET 直接失败，然后去点「上一次渲染留下的行」。
+    // 那个写法能过，只是因为老 harness 的 innerHTML 不清 children——
+    // 真实浏览器里 GET 一失败，面板就只剩一行错误说明，根本没有行可点。
+    // 现在改成**读得成功、写被拒绝**，这才是这条用例真正要验的路径。
     mem.state.memPosts.length = 0;
-    mem.state.fetchMemory = async () => ({ok: false, json: async () => ({error: '不能修改另一世界的记录'})});
+    const realFetch = mem.state.fetchMemory;
+    mem.state.fetchMemory = async (url, opts) => {
+      if (!opts) return realFetch(url, opts);
+      mem.state.memPosts.push(JSON.parse(opts.body));
+      return {ok: false, json: async () => ({error: '不能修改另一世界的记录'})};
+    };
     mem.state.alerts.length = 0;
-    await mem.T.paintMemory().catch(() => {});
+    mem.els.get('#mem-body').children.length = 0;
+    await mem.T.paintMemory();
     const rows = findByClass(mem.els.get('#mem-body'), 'mem-rec');
-    if (rows.length) {
-      await findByClass(rows[0], 'ops')[0].children[2].onclick();   // 删
-    }
+    assert(rows.length > 0, '读取成功时应当画出记录行，否则这条用例没有覆盖到写路径');
+    await findByClass(rows[0], 'ops')[0].children[2].onclick();   // 删
     assert(mem.state.alerts.some(a => a.includes('另一世界')), JSON.stringify(mem.state.alerts));
     ok(true, '记忆接口报错时明确提示，不静默当成成功');
+  }
+
+  // ---------------------------------------------------------------
+  // 空记忆库写进第一条（R-02）
+  //
+  // 真实浏览器复现过的 bug：`paintMemory()` 先 createElement 建输入框与按钮、
+  // 绑好 onclick / keydown，随后在「没有 active 记录」时执行
+  // `body.innerHTML += '<p class="note">还没有记下任何事…</p>'`。
+  // innerHTML 赋值会重建全部子节点，刚绑的处理器随之丢失 —— 点「记下」毫无反应，
+  // 于是**空库永远写不进第一条**。已有记录时那行不执行，所以功能看着是好的。
+  //
+  // 这条用例专门覆盖两个入口：空库、以及「所有条目都进了回收站」。
+  // ---------------------------------------------------------------
+  {
+    const empty = {
+      normal: [],
+      crash: [],
+    };
+    const mem2 = await harness();
+    mem2.T.setWorlds(worlds);
+    mem2.state.fetchMemory = async (url, opts) => {
+      if (!opts) {
+        const w = new URLSearchParams(url.split('?')[1]).get('world');
+        return {ok: true, json: async () => ({world: w, records: empty[w] || [],
+          events: [], warnings: []})};
+      }
+      const body = JSON.parse(opts.body);
+      mem2.state.memPosts.push(body);
+      // 真服务端会返回新记录；这里顺手塞回去，好验证「画完还能再点」。
+      empty[body.world].push({id: 'm-new-' + mem2.state.memPosts.length,
+        world: body.world, text: body.text, status: 'active', revision: 1,
+        subject: body.subject || 'user', created: '2026-10-23T12:00:00'});
+      return {ok: true, json: async () => ({record: empty[body.world].at(-1), warnings: []})};
+    };
+
+    await mem2.T.paintMemory();
+    const body = mem2.els.get('#mem-body');
+    assert(body.discarded.length === 0,
+      '空库渲染时不该用 innerHTML 重写已绑定事件的父节点，被冲掉的节点：' +
+      body.discarded.map(n => n.className || n.id || '(无名)').join(', '));
+
+    const addBox = body.children.find(c => c.className === 'mem-add');
+    assert(addBox, '空库也要有输入框和「记下」按钮');
+    const inp = addBox.children[1], btn = addBox.children[2];
+    assert(typeof btn.onclick === 'function', '「记下」按钮必须挂着点击处理器');
+    inp.value = '审阅用虚构事实：我喜欢雨天';
+    await btn.onclick();
+    assert.equal(mem2.state.memPosts.length, 1,
+      '空库点「记下」必须真的发出请求，实际发出 ' + mem2.state.memPosts.length + ' 次');
+    assert.equal(mem2.state.memPosts[0].text, '审阅用虚构事实：我喜欢雨天');
+    ok(true, '空记忆库能写进第一条（innerHTML 不会冲掉已绑定的处理器）');
+  }
+
+  // 主体与来源（R-07）：新增时能选主体，列表里能看出是谁的事、来源是什么。
+  {
+    const mem4 = await harness();
+    mem4.T.setWorlds(worlds);
+    const rows = [
+      {id: 'm-u', world: 'normal', text: '怕黑', status: 'active', revision: 1,
+       subject: 'user', source: {kind: 'user-stated'}, created: '2026-10-20T10:00:00'},
+      {id: 'm-y', world: 'normal', text: '怕打雷', status: 'active', revision: 1,
+       subject: 'yuki', source: {kind: 'summary'}, created: '2026-10-21T10:00:00'},
+    ];
+    mem4.state.fetchMemory = async (url, opts) => {
+      if (!opts) {
+        return {ok: true, json: async () => ({world: 'normal', records: rows,
+          events: [], warnings: []})};
+      }
+      const b = JSON.parse(opts.body);
+      mem4.state.memPosts.push(b);
+      return {ok: true, json: async () => ({record: b, warnings: []})};
+    };
+    await mem4.T.paintMemory();
+    const body4 = mem4.els.get('#mem-body');
+    const txt4 = textOf(body4);
+    assert(txt4.includes('对方的事'), '要标出这是对方的事：' + txt4);
+    assert(txt4.includes('她自己的事'), '要标出这是她自己的事：' + txt4);
+    assert(txt4.includes('对话摘要'),
+      '摘要来的记录要标出来源，否则分不清是不是亲口说过：' + txt4);
+
+    // 新增时能选主体，选了她自己的事就按 yuki 提交。
+    const addBox4 = body4.children.find(c => c.className === 'mem-add');
+    assert(addBox4.children.length === 3,
+      '新增区要有「主体 / 输入框 / 记下」三个控件，实际 ' + addBox4.children.length);
+    const sel = addBox4.children[0];
+    sel.value = 'yuki';
+    addBox4.children[1].value = '她怕打雷';
+    await addBox4.children[2].onclick();
+    assert.equal(mem4.state.memPosts.at(-1).subject, 'yuki',
+      '选了「她自己的事」就必须按 yuki 提交：' + JSON.stringify(mem4.state.memPosts.at(-1)));
+    ok(true, '记录卡显示主体与来源，新增时能选主体');
+  }
+
+  // 所有条目都进了回收站，也要能新增 —— 空状态提示走的是同一条分支。
+  {
+    const mem3 = await harness();
+    mem3.T.setWorlds(worlds);
+    mem3.state.fetchMemory = async (url, opts) => {
+      if (!opts) {
+        const w = new URLSearchParams(url.split('?')[1]).get('world');
+        return {ok: true, json: async () => ({world: w, warnings: [], events: [],
+          records: [{id: 'm-x', world: w, text: '已被删掉的', status: 'retired',
+            revision: 1, subject: 'user', created: '2026-10-20T10:00:00'}]})};
+      }
+      const b = JSON.parse(opts.body);
+      mem3.state.memPosts.push(b);
+      return {ok: true, json: async () => ({record: b, warnings: []})};
+    };
+    await mem3.T.paintMemory();
+    const body3 = mem3.els.get('#mem-body');
+    assert(body3.discarded.length === 0,
+      '回收站里只剩记录时也不该用 innerHTML 重写父节点');
+    const addBox3 = body3.children.find(c => c.className === 'mem-add');
+    assert(addBox3, '回收站状态下也要有输入框');
+    addBox3.children[1].value = '新的一条';
+    await addBox3.children[2].onclick();
+    assert.equal(mem3.state.memPosts.length, 1,
+      '所有条目进回收站后仍能新增');
+    ok(true, '回收站非空、active 为空时也能新增记忆');
   }
 
   const fixture = spawn(PY, ['-u', path.join(__dirname, 'stream_fixture.py')],

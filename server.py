@@ -212,6 +212,76 @@ def _world_arg(raw: str) -> str | None:
     return raw if raw in pb.WORLD_META else None
 
 
+def _sse_delta(line: bytes) -> str | None:
+    """从一行 SSE 里取出增量文本；不是 `data:` 行或没有正文时返回 None。
+
+    只认 OpenAI 兼容的两种形状：
+      - `choices[0].delta.content`（流式增量）
+      - `choices[0].message.content`（少数实现只在结尾给一次完整内容）
+
+    不做任何启发式猜测：解析不了就不算，宁可状态不更新，也不拼出错字。
+    """
+    line = line.strip()
+    if not line.startswith(b"data:"):
+        return None
+    payload = line[5:].strip()
+    if not payload or payload == b"[DONE]":
+        return None
+    try:
+        obj = json.loads(payload.decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    for key in ("delta", "message"):
+        part = first.get(key)
+        if isinstance(part, dict):
+            text = part.get("content")
+            if isinstance(text, str) and text:
+                return text
+    return None
+
+
+def _collect_sse_text(chunk: bytes, parts: list[str],
+                      buffer: list[bytes] | None = None) -> None:
+    """把刚透传出去的一块字节里的正文追加到 `parts`。
+
+    为什么需要 `buffer`：`api_chat()` 是 `resp.read(1)` 逐字节透传的，
+    一行 SSE 会跨越几十次调用。只解析「本块里以 `\\n` 结尾的完整行」会永远
+    凑不齐——一个字节就是一块，没有一块带换行，正文全被丢掉（第一版就是这样，
+    实测 reply 恒为空串）。
+
+    所以这里维护一段**跨块残留**：把残留和新块拼起来，按 `\\n` 切；
+    最后一段（可能还没结束）留到下次。这样无论调用方按字节喂还是整段喂，
+    结果都一样。
+
+    `buffer` 为 None 时退化成「一块就是一行」的行为，只用于不需要跨块的调用。
+    """
+    data = chunk
+    if buffer is not None:
+        if buffer:
+            data = b"".join(buffer) + chunk
+            buffer.clear()
+        if b"\n" not in data:
+            buffer.append(data)
+            return
+        *complete, rest = data.split(b"\n")
+        if rest:
+            buffer.append(rest)
+        lines = complete
+    else:
+        lines = data.split(b"\n")
+
+    for line in lines:
+        if not line:
+            continue
+        text = _sse_delta(line)
+        if text:
+            parts.append(text)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -514,15 +584,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+        # 边透传边把正文攒下来。为什么在这里做（R-05）：
+        # 场景状态原来只从**用户这句话**更新，所以她说了「（把眼镜摘下来）」
+        # 之后，下一轮 prompt 里仍然是「戴着眼镜」——V-CONT-04 要求的
+        # 「她说摘下 → 下一轮记住」根本没接通。要接上，就必须在回复结束时
+        # 拿到她说的话；而这条链路上唯一能拿到完整正文的地方就是这里。
+        #
+        # 只用于状态，**不落盘、不进日志**：这是她这一刻做了什么，
+        # 不是要留存的聊天记录（存档仍由前端 localStorage 负责）。
+        reply_parts: list[str] = []
+        reply_buffer: list[bytes] = []
         try:
-            while True:
-                chunk = resp.read(1)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+            self._pipe_stream(resp, reply_parts, reply_buffer)
         except (BrokenPipeError, ConnectionResetError):
-            pass  # 用户关页面了
+            pass  # 用户关页面了：已收到的正文仍要用于状态，所以不 return
         except Exception as e:
             sys.stderr.write(f"[server] 流中断: {e}\n")
         finally:
@@ -530,6 +605,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 resp.close()
             except Exception:
                 pass
+            self._commit_reply_scene(composed["world"], "".join(reply_parts))
+
+    def _pipe_stream(self, resp, reply_parts: list[str],
+                     reply_buffer: list[bytes]) -> None:
+        """把上游 SSE 原样透传给浏览器，同时攒下她说的正文。
+
+        抽成独立方法是为了**能测**：R-05 的接线原来只写在 `api_chat()` 里，
+        用例只能自己调 `update_from_reply()`，于是把接线删掉测试照样绿
+        —— 测的是函数本身，不是「它被调用」。现在用例可以直接喂一个
+        假 `resp`，走的是与真实请求同一条代码路径。
+
+        `reply_parts` / `reply_buffer` 由调用方持有，本方法只往里追加。
+        """
+        while True:
+            chunk = resp.read(1)
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+            self.wfile.flush()
+            _collect_sse_text(chunk, reply_parts, reply_buffer)
+
+    def _commit_reply_scene(self, world: str, reply_text: str) -> None:
+        """回复结束后，把她这条回复里的括弧动作记进场景状态（R-05）。
+
+        为什么必须等回复**结束**：状态要反映她最后说的话。中途累积时
+        「摘下又戴上」会被读成摘下；等整条说完再算，`_last_action()` 才能
+        取到最后一个动作。
+
+        失败只管记日志，不抛：状态是锦上添花，已经发出去的回复不该受影响。
+        """
+        reply_text = (reply_text or "").strip()
+        if not reply_text:
+            return
+        try:
+            changed, notes = scene_mod.REGISTRY.update_from_reply(world, reply_text)
+            if changed:
+                sys.stderr.write(f"[server] 她的动作更新了状态 {changed}：{notes}\n")
+        except Exception as e:      # noqa: BLE001
+            sys.stderr.write(f"[server] 场景状态更新失败（不影响回复）: {e}\n")
 
 
 class Server(socketserver.ThreadingTCPServer):

@@ -65,16 +65,41 @@ import threading
 import time
 from pathlib import Path
 
-try:  # 跨进程锁；Windows 上没有 fcntl，退化为进程内锁
+try:  # 跨进程锁；Windows 上没有 fcntl，用 msvcrt 顶上
     import fcntl
 except ImportError:  # pragma: no cover - 只在 Windows 上走到
     fcntl = None
+
+try:  # Windows 的跨进程文件锁
+    import msvcrt
+except ImportError:  # pragma: no cover - 只在非 Windows 上走到
+    msvcrt = None
 
 WORLDS = ("normal", "crash")
 SUBJECTS = ("user", "yuki", "together", "world")
 STATUSES = ("active", "retired")
 
 _DEFAULT_DIR = Path(__file__).resolve().parent / "data" / "memory"
+
+#: 每个「存储文件」一把进程内锁，**按绝对路径共享**。
+#:
+#: 为什么不能用实例字段：`server.py::memory_store()` 每个请求都新建一个
+#: `MemoryStore`，实例锁只保护得住同一个实例。两个请求各自持锁互不相干，
+#: 「读—改—写」照样交错，后写的把先写的整个覆盖掉——两边都返回成功，
+#: 用户看不出丢了数据（R-04，实测 6 条并发写只剩 1 条）。
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    """取这条存储路径对应的进程内锁（同一路径永远同一把）。"""
+    key = str(path.resolve()).lower()
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+        return lock
 
 
 class MemoryError_(Exception):
@@ -83,6 +108,20 @@ class MemoryError_(Exception):
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _is_readable_json(path: Path) -> bool:
+    """这个文件能不能解析成 JSON。
+
+    备份前用它判断「主文件本身是不是已经坏了」：坏文件复制过去只会
+    毁掉唯一一份可用的备份（R-06）。只判断可读性，不校验内容结构——
+    结构问题由 `_load_raw()` 负责，那是读的路径。
+    """
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _atomic_write(path: Path, payload: dict) -> None:
@@ -157,14 +196,31 @@ class MemoryStore:
         data.setdefault("records", [])
         return data, warns
 
-    def _save_raw(self, data: dict) -> None:
-        """写主文件；写前留一份 .bak。"""
+    def _save_raw(self, data: dict) -> str | None:
+        """写主文件；写前留一份 `.bak`。**返回备份相关的警告，没有就是 None。**
+
+        两条规则（R-06，见 reviews/2026-10-23-zip-merge-review.md）：
+
+        1. **备份失败必须说出来。** 原实现 `except OSError: pass`，注释写
+           「会在 log 里留痕」，实际什么都没留：用户以为有备份，其实没有。
+           这里把原因返回给调用方，由它并进 `warnings` 与操作日志。
+        2. **不用坏主文件覆盖好备份。** 如果当前主文件本身就是坏的
+           （读的时候退到了 `.bak`），再照常复制就会把唯一可用的备份毁掉；
+           之后 replace 一旦失败，就彻底没有可恢复的东西了。
+           所以先确认主文件能解析，不能就跳过备份、保留旧 `.bak`。
+        """
+        warn = None
         if self.path.exists():
-            try:
-                shutil.copy2(self.path, self.path.with_suffix(".json.bak"))
-            except OSError:
-                pass  # 备份失败不阻断写入，但会在 log 里留痕
+            if _is_readable_json(self.path):
+                try:
+                    shutil.copy2(self.path, self.path.with_suffix(".json.bak"))
+                except OSError as e:
+                    warn = f"备份失败（主记录已保存，但没有新的 .bak）：{e}"
+            else:
+                # 主文件损坏：跳过备份，宁可让 .bak 停在上一份好的。
+                warn = "主文件损坏，本次未更新备份；.bak 保留为上一份可用版本"
         _atomic_write(self.path, data)
+        return warn
 
     def _log(self, event: dict) -> str | None:
         """追加一条操作日志。返回警告文本（失败时），不抛异常。"""
@@ -180,18 +236,40 @@ class MemoryStore:
     def _mutate(self, fn):
         """加锁执行 fn(data) -> (result, event)。
 
-        锁的顺序：进程内 threading.Lock → 文件锁。反过来会在多线程下自锁。
+        三层锁，顺序固定：
+          1. **按路径共享的进程内锁**（`_lock_for`）——同一进程里多个
+             `MemoryStore` 实例操作同一个文件时靠它串行。
+          2. **跨进程文件锁**——POSIX 用 `fcntl.flock`，Windows 用
+             `msvcrt.locking`。多进程/多标签页同时写时靠它。
+          3. 都不影响读：读走 `_load_raw()`，不加写锁。
+
+        第 1 层是 R-04 的核心：原来锁是实例字段，而服务端每个请求新建一个
+        实例，等于没有锁。第 2 层 Windows 上原来完全缺失（`fcntl` 导入失败
+        就直接跳过），现在用 `msvcrt` 补上——否则重启一个进程就又能并发覆盖。
         """
-        with self._lock:
+        with _lock_for(self.path):
             lock_file = None
+            lock_handle = None
             try:
+                self.root.mkdir(parents=True, exist_ok=True)
+                lock_path = self.root / f".memory-{self.world}.lock"
                 if fcntl is not None:
-                    self.root.mkdir(parents=True, exist_ok=True)
-                    lock_file = (self.root / f".memory-{self.world}.lock").open("w")
+                    lock_file = lock_path.open("w")
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                elif msvcrt is not None:
+                    # Windows：`msvcrt.locking` 需要一个至少有 1 字节的文件，
+                    # 并且从当前位置锁起。`LK_LOCK` 会重试 10 秒后抛 OSError。
+                    lock_handle = lock_path.open("a+b")
+                    if lock_handle.tell() == 0 and lock_path.stat().st_size == 0:
+                        lock_handle.write(b"\0")
+                        lock_handle.flush()
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
                 data, warns = self._load_raw()
                 result, event = fn(data)
-                self._save_raw(data)
+                save_warn = self._save_raw(data)
+                if save_warn:
+                    warns.append(save_warn)
                 warn = self._log(event)
                 if warn:
                     warns.append(warn)
@@ -202,6 +280,14 @@ class MemoryStore:
                         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                     finally:
                         lock_file.close()
+                if lock_handle is not None:
+                    try:
+                        lock_handle.seek(0)
+                        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                    finally:
+                        lock_handle.close()
 
     # ------------------------------------------------------------
     # 公开接口
@@ -306,11 +392,69 @@ class MemoryStore:
 
         return self._mutate(fn)
 
-    def restore(self, rid: str) -> tuple[dict, list[str]]:
-        """从回收站恢复。
+    # ------------------------------------------------------------
+    # 修订链
+    # ------------------------------------------------------------
+    @staticmethod
+    def _chain_of(records: list[dict], rid: str) -> list[str]:
+        """找出 `rid` 所在的整条修订链（按 `revises` 连起来的），含自己。
 
-        如果它有后继（`retired_by` 指向一条纠正它的记录），恢复前必须把后继
-        也退下来——否则同一件事会有两个 active 版本，正是 V-MEM-05 要防的。
+        **为什么用 `revises` 而不是 `retired_by`**：`retired_by` 只在「纠正」
+        那一刻写进去，恢复时会被清掉，链条就断了；而且它只是单向的指针
+        （旧 → 新），拿到新的一条无法反查旧的有哪些。
+        `revises` 是**跟着记录本身**存下来的，一条记录永远知道自己是改自哪条，
+        所以从任意一条出发都能把整条链走全。R-03 的两个反例都源于
+        「只沿 `retired_by` 看一步」。
+
+        返回顺序按 `revision` 升序（最早的在前），同 revision 时按 created。
+        """
+        def parent_of(rec):
+            return rec.get("revises")
+
+        # 先往上走到根，再往下收集整棵树（链是线性的，但仍按树处理，
+        # 万一有分叉也能全收进来——总比漏掉好）。
+        by_id = {r["id"]: r for r in records}
+        root = rid
+        seen = set()
+        while True:
+            rec = by_id.get(root)
+            if rec is None or root in seen:
+                break
+            seen.add(root)
+            parent = parent_of(rec)
+            if not parent or parent not in by_id:
+                break
+            root = parent
+
+        members = []
+        stack = [root]
+        while stack:
+            cur = stack.pop()
+            if cur in {m["id"] for m in members}:
+                continue
+            rec = by_id.get(cur)
+            if rec is None:
+                continue
+            members.append(rec)
+            stack.extend(r["id"] for r in records if r.get("revises") == cur)
+
+        members.sort(key=lambda r: (int(r.get("revision", 1)), r.get("created", "")))
+        return [r["id"] for r in members]
+
+    def restore(self, rid: str) -> tuple[dict, list[str]]:
+        """从回收站恢复。**恢复之后，整条修订链只能剩下这一条 active。**
+
+        原实现只沿 `retired_by` 看一个直接后继，所以有两个真实反例
+        （R-03，见 reviews/2026-10-23-zip-merge-review.md）：
+
+          1. 三代链 A→B→C，恢复 A：只退下 B，C 仍是 active，
+             于是 prompt 里同时出现 A 和 C —— 两个互斥版本都成了事实。
+          2. A→B 往返恢复：恢复时 `pop("retired_by")` 把关联抹掉，
+             再恢复 B 时已经看不到 A，最后 A、B 一起 active。
+
+        现在改成：先把**整条链**按 `revises` 找出来，除了要恢复的这一条，
+        其余 active 全部退下。链上其余记录的状态与 `retired_by` 一律重算，
+        不留半截关联——半截关联正是第二个反例的成因。
         """
         def fn(data):
             rec = next((r for r in data["records"] if r["id"] == rid), None)
@@ -318,19 +462,31 @@ class MemoryStore:
                 raise MemoryError_(f"记录不存在：{rid}")
             if rec.get("world") != self.world:
                 raise MemoryError_("不能恢复另一世界的记录")
+
+            chain = self._chain_of(data["records"], rid)
+            by_id = {r["id"]: r for r in data["records"]}
             retired_followers = []
-            succ = rec.get("retired_by")
-            if succ:
-                nxt = next((r for r in data["records"] if r["id"] == succ), None)
-                if nxt is not None and nxt.get("status") == "active":
-                    nxt["status"] = "retired"
-                    nxt["retired_at"] = _now()
-                    nxt["retired_by"] = None
-                    retired_followers.append(nxt["id"])
+            for cid in chain:
+                if cid == rid:
+                    continue
+                other = by_id.get(cid)
+                if other is None:
+                    continue
+                if other.get("status") == "active":
+                    other["status"] = "retired"
+                    other["retired_at"] = _now()
+                    retired_followers.append(cid)
+                # 链上其余记录的 retired_by 一律指向**这条**（当前唯一有效版本）。
+                # 留成 None 会让下一次恢复又找不到关联，就是反例 2。
+                if other.get("status") == "retired":
+                    other["retired_by"] = rid
+
             rec["status"] = "active"
             rec.pop("retired_at", None)
-            rec.pop("retired_by", None)
-            ev = {"op": "restore", "id": rid, "retired_followers": retired_followers}
+            # 恢复的这一条自己不再是「被谁取代」的状态。
+            rec["retired_by"] = None
+            ev = {"op": "restore", "id": rid, "retired_followers": retired_followers,
+                  "chain": chain}
             return rec, ev
 
         return self._mutate(fn)

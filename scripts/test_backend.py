@@ -229,6 +229,94 @@ class BackendTests(unittest.TestCase):
                 for marker in ('〔', '另一条世界线'):
                     self.assertNotIn(marker, block)
 
+    def test_05c_context_lines_are_filtered_per_world(self):
+        """上下文窗口里**每一行**都不能属于另一世界（R-01，WORLD-001-B）。
+
+        为什么单独立一条：`test_05` 的注入块检查只收集以 `▶` 开头的**中心句**
+        时间点，普通上下文行一条都没查。实测索引里有 10 个窗口、30 行上下文
+        属于另一世界（全部在《消失》切片附近），而 test_05 一直是绿的。
+
+        所以这里做两件事，都不看 `▶`：
+          1. **索引层**：`ctx_worlds` 必须逐行存在，且长度与 `ctx` 行数一致；
+             并且全量扫描 13070 条，不许出现「本行世界 ≠ 记录世界」的残留。
+          2. **渲染层**：对**所有**命中做一次真实 prompt 组装，注入块里出现的
+             每一个时间码，都必须能在本世界找到对应记录。
+
+        第 2 点是关键：它不假设哪几行会被裁掉，而是拿「出现的每个时间码」
+        去反查世界。裁多了不算错（宁可缺），出现另一世界的行才算错。
+        """
+        # 1) 索引层：逐行世界标注存在且自洽
+        for d in self.corpus.docs:
+            self.assertIn('ctx_worlds', d,
+                          f'{d["id"]} 缺少逐行世界标注，无法按行过滤')
+            n_lines = len(d['ctx'].splitlines())
+            self.assertEqual(
+                len(d['ctx_worlds']), n_lines,
+                f'{d["id"]} 的 ctx_worlds 与 ctx 行数不一致：'
+                f'{len(d["ctx_worlds"])} vs {n_lines}')
+
+        # 全量扫一遍：有没有「窗口内出现另一世界行」的记录。
+        # 这不是要求索引被裁干净（原文必须全留），而是要求**标注**是准的，
+        # 且渲染层能据此裁掉。所以这里只统计，真正的断言在下面渲染层。
+        world_of = {(d['ep'], d['start']): d['world'] for d in self.corpus.docs}
+        for d in self.corpus.docs:
+            for ts, w in zip(
+                    [line.strip().lstrip('▶').strip().split(None, 1)[0]
+                     for line in d['ctx'].splitlines() if line.strip()],
+                    d['ctx_worlds']):
+                expect = world_of.get((d['ep'], ts))
+                if expect is not None:
+                    self.assertEqual(
+                        w, expect,
+                        f'{d["id"]} 的上下文行 {ts} 标成 {w}，实际是 {expect}')
+
+        # 2) 渲染层：真实组装 prompt，注入块里的每个时间码都得属于本世界
+        #
+        # **这里踩过一次空断言**：第一版按 `[1] 标题 · 0:37:54` 里的标题反查集数，
+        # 但那是 `ep_title`（「凉宫春日的消失（剧场版）」），不是 `ep`（`消失`），
+        # 于是 `(ep, ts)` 永远查不到，`other_starts` 里也就永远不命中——
+        # 用例恒绿。变异 M52 把逐行过滤整个删掉都没红，才暴露出来。
+        #
+        # 改成不依赖集名：**`(集, 时间码)` 只在《消失》里跨世界**，所以只要看
+        # 「这个时间码在本世界有没有对应记录、在另一世界有没有」，两边一比就清楚。
+        # 具体做法：把每行的 `时间码` 摊平成集合，分别求它与两个世界的交集；
+        # 若某行只属于另一世界，就是跨界。
+        blocks_checked = 0
+        lines_checked = 0
+        for world, other in (('normal', 'crash'), ('crash', 'normal')):
+            mine_starts = {d['start'] for d in self.corpus.docs
+                           if d['world'] == world and d['ep'] == '消失'}
+            other_starts = {d['start'] for d in self.corpus.docs
+                            if d['world'] == other and d['ep'] == '消失'}
+            # 用会命中《消失》切片附近的查询，才能覆盖到跨界窗口
+            for query in ('不可能有那回事', '这样的选手变更是谁安排的',
+                          '你为什么戴眼镜', '信息统合思念体'):
+                hits = self.corpus.search(world, query, k=6)
+                block = pb.render_hits(hits, world)
+                if not block:
+                    continue
+                blocks_checked += 1
+                for line in block.splitlines():
+                    body = line.strip().lstrip('▶').strip()
+                    if not body or body.startswith('['):
+                        continue
+                    # **按空白取第一个字段**，不要用 `[:8]` 切片：
+                    # 「0:38:13  这样的选手…」的前 8 个字符是 `'0:38:13 '`
+                    # （带尾随空格），跟 `start` 里的 `'0:38:13'` 不相等，
+                    # 于是整个判据恒为真——变异 M52 删掉逐行过滤都没红，
+                    # 就是这么来的。切片看着「时间码总是 7 位」，实际会带空格。
+                    ts = body.split(None, 1)[0]
+                    lines_checked += 1
+                    # 这个时间码只属于另一世界 → 不该出现在本世界的块里
+                    if ts in other_starts and ts not in mine_starts:
+                        self.fail(
+                            f'{world} 的注入块含 {other} 的上下文行 {ts}\n'
+                            f'查询：{query}\n--- 块 ---\n{block}')
+        self.assertGreater(blocks_checked, 0, '没有覆盖到任何注入块，用例失效')
+        # 防止「一块都没解析出行」这种静默失效：必须真的检查过上下文行。
+        self.assertGreater(lines_checked, 20,
+                           f'只检查了 {lines_checked} 行，覆盖不足，用例可能已失效')
+
     def test_05b_retriever_filters_by_world(self):
         """检索层必须硬过滤，而不是降权。"""
         for world in ('normal', 'crash'):
@@ -839,6 +927,263 @@ class BackendTests(unittest.TestCase):
             self.assertNotIn('你改主意了', system_for('考研的事怎么样了'))
             self.assertEqual(second['status'], 'active')  # 刚建时是 active
 
+    def test_14e_restore_keeps_one_active_version_in_chain(self):
+        """恢复必须让**整条修订链**只剩一个 active（R-03，V-MEM-03）。
+
+        `test_14b` 只覆盖了「恢复直接后继」这一种形状，所以一直是绿的。
+        实测能复现两个反例（见 reviews/2026-10-23-zip-merge-review.md R-03）：
+
+          1. 三代链 A→B→C，恢复 A：原实现只把 B 退下，C 仍是 active，
+             于是 active 里同时有 A 和 C —— 两个互斥版本都进了 prompt。
+          2. A→B 往返恢复：恢复 A 时把 A 的 `retired_by` 抹掉了，
+             再恢复 B 也抹掉 B 的，最后 A、B 一起 active。
+
+        判据不看实现细节，只看「同一条链上有几个 active」：
+        **任一时刻，同一条修订链必须恰好只有一个 active**。
+        """
+        ctx, _ = self.memory_dir()
+        with ctx:
+            def post(body):
+                status, raw = self.request('/api/memory', body)
+                self.assertEqual(status, 200, raw)
+                return json.loads(raw)['record']
+
+            def active_texts():
+                view = json.loads(self.request('/api/memory?world=normal')[1])
+                return [r['text'] for r in view['records'] if r['status'] == 'active']
+
+            def chain_of(records):
+                """按 revises 把记录分成链。返回 id -> 链根 id。"""
+                parent = {r['id']: r.get('revises') for r in records}
+
+                def root(rid):
+                    seen = set()
+                    cur = rid
+                    while parent.get(cur) and cur not in seen:
+                        seen.add(cur)
+                        cur = parent[cur]
+                    return cur
+                return {r['id']: root(r['id']) for r in records}
+
+            # --- 情形 1：三代链，恢复最早的一代 ---
+            a = post({'world': 'normal', 'op': 'add', 'text': '我不吃辣'})
+            b = post({'world': 'normal', 'op': 'add', 'text': '我能吃一点辣',
+                      'revises': a['id']})
+            c = post({'world': 'normal', 'op': 'add', 'text': '我能吃重辣',
+                      'revises': b['id']})
+            self.assertEqual(active_texts(), ['我能吃重辣'], '三代链建好后只该有一条 active')
+
+            post({'world': 'normal', 'op': 'restore', 'id': a['id']})
+            records = json.loads(self.request('/api/memory?world=normal')[1])['records']
+            roots = chain_of(records)
+            by_root = {}
+            for r in records:
+                if r['status'] == 'active':
+                    by_root.setdefault(roots[r['id']], []).append(r['text'])
+            dup = {k: v for k, v in by_root.items() if len(v) > 1}
+            self.assertFalse(
+                dup, f'恢复最早一代后，同一条链上出现多个 active：{dup}')
+            self.assertEqual(active_texts(), ['我不吃辣'],
+                             '恢复 A 之后只剩 A 生效，C 必须一起退下')
+
+            # --- 情形 2：往返恢复 ---
+            d = post({'world': 'normal', 'op': 'add', 'text': '我养了一只猫'})
+            e = post({'world': 'normal', 'op': 'add', 'text': '我不养猫了',
+                      'revises': d['id']})
+            post({'world': 'normal', 'op': 'restore', 'id': d['id']})
+            self.assertIn('我养了一只猫', active_texts())
+            self.assertNotIn('我不养猫了', active_texts())
+            post({'world': 'normal', 'op': 'restore', 'id': e['id']})
+            self.assertIn('我不养猫了', active_texts(),
+                          '恢复 B 之后 B 生效')
+            self.assertNotIn('我养了一只猫', active_texts(),
+                             '往返恢复后 A 必须退下，不能两条同时 active')
+
+            # --- 情形 3：prompt 里也不能同时出现两个互斥版本 ---
+            sp = json.loads(self.request('/api/preview', {
+                'world': 'normal', 'message': '你还吃辣吗，猫呢'})[1])['system_prompt']
+            self.assertIn('我不吃辣', sp)
+            self.assertNotIn('我能吃重辣', sp,
+                             '恢复最早一代后，第三代不该还在 prompt 里')
+            self.assertNotIn('我能吃一点辣', sp)
+
+    def test_16b_memory_concurrent_writes_do_not_lose_records(self):
+        """并发写不能静默丢记录（R-04，CHAT-016-A）。
+
+        `test_16` 只测 `os.replace` 失败，那是**半文件**问题。这里测的是另一件：
+        两个 MemoryStore 指向同一个文件、同时「读—改—写」，后写的那次会把
+        前一次的修改整个覆盖掉——两个请求都返回成功，`warnings` 都是空，
+        但最终文件里只剩一条。
+
+        为什么 Windows 上一定会发生：`server.py` 每次请求都新建一个
+        `MemoryStore`，而锁是**实例字段**；跨进程那层用的是 `fcntl`，
+        Windows 根本没有。于是两个实例的锁互不相干。
+
+        判据不看用了什么锁，只看结果：N 条并发写入，最后必须 N 条都在。
+        「都报成功」和「文件里都有」两者必须一致，否则就是**静默**丢数据。
+        """
+        ctx, root = self.memory_dir()
+        with ctx:
+            import memory as memory_mod
+            from pathlib import Path
+
+            n = 6
+            stores = [memory_mod.MemoryStore(root, world='normal') for _ in range(n)]
+            barrier = threading.Barrier(n)
+            errors = []
+            results = []
+
+            # 让所有实例在「读完、还没写」的时刻同步，把竞态放大到必然发生。
+            original_load = memory_mod.MemoryStore._load_raw
+
+            def synced_load(self, *a, **kw):
+                data = original_load(self, *a, **kw)
+                try:
+                    barrier.wait(timeout=10)
+                except threading.BrokenBarrierError:
+                    pass   # 已经被串行化时屏障会超时，那正是修好之后的正常情况
+                return data
+
+            memory_mod.MemoryStore._load_raw = synced_load
+            try:
+                def work(i):
+                    try:
+                        rec, warns = stores[i].add(f'并发写入第 {i} 条')
+                        results.append((i, rec['id'], list(warns)))
+                    except Exception as e:            # noqa: BLE001
+                        errors.append((i, repr(e)))
+
+                threads = [threading.Thread(target=work, args=(i,)) for i in range(n)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30)
+            finally:
+                memory_mod.MemoryStore._load_raw = original_load
+
+            self.assertFalse(errors, f'并发写入抛错：{errors}')
+            self.assertEqual(len(results), n, '每次写入都应返回成功')
+            self.assertFalse([r for r in results if r[2]],
+                             f'写入返回了警告，说明已经察觉异常却不报错：{results}')
+
+            final = memory_mod.MemoryStore(root, world='normal').load()[0]
+            text_in_file = {r['text'] for r in final}
+            expected = {f'并发写入第 {i} 条' for i in range(n)}
+            missing = expected - text_in_file
+            self.assertFalse(
+                missing,
+                f'{n} 条并发写入全部报成功，但文件里少了 {len(missing)} 条：'
+                f'{sorted(missing)}\n实际内容：{sorted(text_in_file)}')
+
+    def test_16c_memory_visible_backup_failure(self):
+        """备份失败必须看得见，且不能覆盖掉唯一的好备份（R-06，V-MEM-04）。
+
+        原实现 `except OSError: pass`，注释却写「会在 log 里留痕」。
+        实测：让 `shutil.copy2` 抛错之后，新增照常成功、`warnings` 是空的、
+        日志里也没有任何记录、`.bak` 根本没生成——用户以为有备份，其实没有。
+
+        这里连**恢复风险**一起锁住：主文件是坏的、`.bak` 是好的时，
+        下一次保存不能拿坏的主文件去覆盖那个好备份。否则随后的 replace
+        一旦失败，唯一可用的备份也没了。
+        """
+        ctx, root = self.memory_dir()
+        with ctx:
+            import memory as memory_mod
+
+            store = memory_mod.MemoryStore(root, world='normal')
+            store.add('第一条')
+            store.add('第二条')   # 第二次写入才会产生 .bak（第一次时还没有主文件）
+
+            original = memory_mod.shutil.copy2
+            try:
+                def boom(*a, **kw):
+                    raise OSError('模拟磁盘写满')
+                memory_mod.shutil.copy2 = boom
+                rec, warns = store.add('备份应当失败的那一条')
+            finally:
+                memory_mod.shutil.copy2 = original
+
+            self.assertEqual(rec['text'], '备份应当失败的那一条')
+            self.assertTrue(warns, '备份失败必须有可见警告，不能静默吞掉')
+            self.assertTrue(
+                any('备份' in w for w in warns),
+                f'警告里要说明是备份出了问题：{warns}')
+            events = store.log_events(20)
+            self.assertTrue(
+                any('备份' in str(e) for e in events),
+                f'备份失败也要写进操作日志：{events}')
+
+            # --- 恢复风险：坏主文件 + 好备份，下一次保存不能覆盖好备份 ---
+            good = store.path.with_suffix('.json.bak')
+            self.assertTrue(good.exists(), '正常写入之后应当有 .bak')
+            before = good.read_bytes()
+            store.path.write_text('{ 这不是合法 JSON', encoding='utf-8')
+            # 从坏文件恢复：读的时候会退到 .bak，并把警告带出来
+            loaded, load_warns = store.load()
+            self.assertTrue(load_warns, '主文件坏了必须给出警告')
+            self.assertTrue(loaded, '应当能从 .bak 读回记录')
+            # 再写一次：此时主文件是坏的，绝不能拿它覆盖 .bak
+            store.add('恢复之后再写一条')
+            self.assertEqual(
+                good.read_bytes(), before,
+                '主文件损坏时不能用它覆盖 .bak —— 那会把唯一可用的备份也毁掉')
+
+    def test_14f_memory_subject_and_source_reach_the_prompt(self):
+        """主体与来源必须传到消费端（R-07，CHAT-018）。
+
+        实测过的问题：同一句「不吃香菜」，`subject=user/source=manual`
+        与 `subject=yuki/source=summary` 渲染出的共同经历块**逐字相同**，
+        只有日期和文本。模型因此分不清这是「对方说过的事」还是
+        「她自己做过的事」，也分不清是用户亲口说的还是模型摘要。
+
+        现在还没有自动摘要，所以「摘要污染」尚未发生；但接自动提取
+        （PEND-008）之前必须先把这条通路建起来，否则第一版就会混。
+
+        判据：**两种主体渲染出的块必须不同**，且块里能看出是谁的事、
+        来源是什么。只要求「可区分」，不规定具体措辞。
+        """
+        def block_for(records):
+            return pb.render_shared_memory(records, 'normal')
+
+        user_manual = [{
+            'id': 'm-u', 'world': 'normal', 'text': '不吃香菜',
+            'subject': 'user', 'status': 'active', 'created': '2026-10-20T10:00:00',
+            'source': {'kind': 'user-stated'}}]
+        yuki_summary = [{
+            'id': 'm-y', 'world': 'normal', 'text': '不吃香菜',
+            'subject': 'yuki', 'status': 'active', 'created': '2026-10-20T10:00:00',
+            'source': {'kind': 'summary'}}]
+
+        a = block_for(user_manual)
+        b = block_for(yuki_summary)
+        self.assertTrue(a and b, '两块都不该为空')
+        self.assertNotEqual(
+            a, b,
+            f'主体与来源不同，渲染出的块却一模一样：\n{a}')
+
+        # 主体要能看出来：用户的事 / 她的事，措辞不同
+        self.assertIn('对方', a, f'用户的事应当标成对方说的：{a}')
+        self.assertIn('你', b, f'她自己的事应当用她的视角写：{b}')
+
+        # 来源要能看出来，且不能把摘要当成亲口说过
+        self.assertNotEqual(a, block_for([{**user_manual[0],
+                                          'source': {'kind': 'summary'}}]),
+                            '来源不同，渲染必须不同')
+
+    def test_14g_memory_subject_and_source_reach_the_ui(self):
+        """界面拿到的记录要带主体与来源（R-07）。"""
+        ctx, _ = self.memory_dir()
+        with ctx:
+            self.request('/api/memory', {
+                'world': 'normal', 'op': 'add', 'text': '怕黑',
+                'subject': 'yuki'})
+            view = json.loads(self.request('/api/memory?world=normal')[1])
+            rec = view['records'][0]
+            self.assertEqual(rec['subject'], 'yuki',
+                             '写法要能指定主体，不能一律记成用户的')
+            self.assertIn('source', rec, '记录要带来源，界面才能显示')
+            self.assertIsInstance(rec['source'], dict)
+
     def test_14c_memory_log_is_traceable(self):
         """V-MEM-05：改了什么要查得到，日志里带旧文本。"""
         ctx, _ = self.memory_dir()
@@ -1118,6 +1463,96 @@ class BackendTests(unittest.TestCase):
         self.assertIn('没有戴眼镜', block)   # 主线默认
         self.assertIs(snap['glasses'], False)
 
+    def _run_reply(self, world, reply_text):
+        """走 `/api/chat` 本身，只是把上游换成假的（R-05）。
+
+        为什么不能用更轻的写法：最初的版本自己调
+        `_commit_reply_scene()`，于是把 `api_chat()` 里那一行接线删掉，
+        用例照样绿——测的是「函数会算」，不是「它被调用」。
+        这里 patch `server.OPENER`，让 `api_chat()` 完整跑一遍：
+        组装 → 连上游 → 逐字节透传 → 收尾更新状态。
+        """
+        payload = json.dumps(
+            {"choices": [{"delta": {"content": reply_text}}]},
+            ensure_ascii=True)
+        sse = f"data: {payload}\n\ndata: [DONE]\n".encode("ascii")
+
+        class FakeResp:
+            def __init__(self, data):
+                self.data = [bytes([b]) for b in data]   # 与真实链路一样逐字节
+
+            def read(self, n=1):
+                return self.data.pop(0) if self.data else b""
+
+            def close(self):
+                pass
+
+        class FakeOpener:
+            def open(self, req, timeout=None):
+                return FakeResp(sse)
+
+        # 真的发一次 HTTP 请求，只是上游被换掉了。
+        with patch.object(server, 'OPENER', FakeOpener()):
+            status, raw = self.request('/api/chat', {
+                'world': world, 'message': '在吗',
+                'api_key': 'test-key-not-real', 'base_url': 'http://fake.invalid/v1',
+                'model': 'test'})
+        self.assertEqual(status, 200, raw[:300])
+        # `raw` 是 SSE 原文（bytes）。上游是按 ensure_ascii 输出的，
+        # 中文会变成 \uXXXX，所以断言查的是**解析后的正文**，不是原字节。
+        decoded = []
+        tmp = []
+        for byte in raw:
+            server._collect_sse_text(bytes([byte]), decoded, tmp)
+        self.assertEqual(''.join(decoded), reply_text,
+                         f'回复没有完整透传到客户端：{raw[:200]!r}')
+        return ''.join(decoded)
+
+    def test_23c_her_own_reply_updates_scene_state(self):
+        """她说的话要能改状态，下一轮必须看见（R-05，V-CONT-04）。
+
+        这是 R-05 里最关键的一条：状态原来只从**用户这句话**更新，
+        所以她说「（把眼镜摘下来）」之后，下一轮 prompt 里仍是「戴着眼镜」。
+
+        断言落在**下一轮的 system** 上，而不是「函数被调用过」。
+        用例走的是 `api_chat()` 的同一条路径（`_pipe_stream` + `_commit_reply_scene`），
+        所以把接线删掉它就会红——这一点实测过。
+        """
+        world = 'crash'
+        server.scene_mod.REGISTRY.reset(world)
+        self.assertIs(server.scene_mod.REGISTRY.get(world).state['glasses'], True,
+                      '前置：崩溃世界默认戴着眼镜')
+
+        # 1) 上游流式回复里她摘了眼镜，走真实的透传路径
+        reply = self._run_reply(world, '（把眼镜摘下来）')
+        self.assertIn('把眼镜摘下来', reply, f'SSE 累积失败：{reply!r}')
+
+        # 2) 下一轮真的看得见
+        doc = self.turn(world, '眼镜呢')
+        self.assertIs(doc['scene_state']['glasses'], False,
+                      '上一轮她摘了眼镜，这一轮状态仍是戴着')
+        self.assertIn('没有戴眼镜', doc['system_prompt'])
+        self.assertNotIn('戴着眼镜', doc['system_prompt'])
+
+    def test_23c2_reply_uses_last_action_in_message(self):
+        """一条回复里「摘下又戴上」，按最后那个算（R-05 的边界）。
+
+        累积中途就算，会被读成「摘下」；必须等整条说完再判断。
+        """
+        world = 'crash'
+        server.scene_mod.REGISTRY.reset(world)
+        self._run_reply(world, '（把眼镜摘下来）……（又戴上了）')
+        doc = self.turn(world, '眼镜呢')
+        self.assertIs(doc['scene_state']['glasses'], True,
+                      '最后一步是戴上，状态就该是戴着')
+
+    def test_23d_reply_does_not_move_the_user(self):
+        """她说「我到活动室了」不代表用户到了（R-05 第 ② 条）。"""
+        server.scene_mod.REGISTRY.reset('normal')
+        self._run_reply('normal', '我到活动室了。')
+        doc = self.turn('normal', '在吗')
+        self.assertIs(doc['scene_state']['together'], False)
+
     def test_24_history_keeps_what_pronouns_point_to(self):
         """CHAT-010 的机制层：指代要被接住，前提是前几轮真的在请求里。
 
@@ -1214,6 +1649,47 @@ class BackendTests(unittest.TestCase):
                              f'ART_PROMPT 里出现配额式说法「{bad}」，与 DEC-007 冲突')
         # 反过来，「不画也正常」必须写着，否则模型会以为不画是没做到。
         self.assertIn('只说话永远', pb.ART_PROMPT)
+
+    def test_28b_art_format_is_an_explicit_exception(self):
+        """字符画的格式要求必须**明确写成例外**（R-08，CHAT-017）。
+
+        崩溃世界的 system 里同时有两段：
+          - `TERMINAL_PROMPT`：「不要分段，不要空行，不要列表」
+          - `ART_PROMPT`：「图案单独占几行，文字写在图案下面」
+        第二段没有说明自己是第一段的例外，模型只能自己猜哪条优先。
+        现有用例只查「两段都在不在」，查不出这个矛盾。
+
+        判据不看措辞，看**关系**：ART_PROMPT 里必须出现「例外 / 只对图案」
+        这类限定，并且点名它放宽的是「分段」这条规则。只加一句
+        「可以画」不算修好——那等于又多了一条规定。
+        """
+        self.assertIn('例外', pb.ART_PROMPT,
+                      f'ART_PROMPT 必须说明自己是基础格式的例外：{pb.ART_PROMPT}')
+        self.assertIn('图案', pb.ART_PROMPT)
+        # 必须点名放宽的是哪一条，否则模型不知道「不要分段」还算不算数。
+        self.assertTrue(
+            any(k in pb.ART_PROMPT for k in ('分段', '空行')),
+            f'ART_PROMPT 要点名放宽的是「分段 / 空行」那条：{pb.ART_PROMPT}')
+        # 并且要说清：除了图案块，其余文字仍然守原规则。
+        self.assertTrue(
+            any(k in pb.ART_PROMPT for k in ('其余', '其他', '除了', '文字部分')),
+            f'ART_PROMPT 要限定适用范围，不能整条放宽：{pb.ART_PROMPT}')
+
+    def test_28c_art_exception_reaches_crash_prompt_only(self):
+        """例外只出现在放开画的世界；主线不许出现这条例外（DEC-013）。"""
+        msgs_crash = pb.build_messages(
+            pb.persona_for(server.load_personas(), 'crash'),
+            'crash', [], [], '在吗')
+        sp_crash = msgs_crash[0]['content']
+        self.assertIn('例外', sp_crash)
+        self.assertIn('不要分段', sp_crash)   # 基础规则仍在，只是有了例外
+
+        msgs_normal = pb.build_messages(
+            pb.persona_for(server.load_personas(), 'normal'),
+            'normal', [], [], '在吗')
+        sp_normal = msgs_normal[0]['content']
+        self.assertNotIn('图案单独占几行', sp_normal,
+                         '主线世界不该出现字符画的格式例外')
 
     def test_29_preview_reports_kind_per_world(self):
         """`/api/preview` 按世界回报 kind：前端不用自己再猜一遍规则。"""

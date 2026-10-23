@@ -186,6 +186,10 @@ class Corpus:
                 "world": d["world"],
                 "text": d["text"],
                 "ctx": d["ctx"],
+                # 逐行世界归属（R-01 / WORLD-001-B）。渲染层据此裁掉
+                # 窗口里属于另一世界的上下文行。旧索引没有这个字段时
+                # 是 None，`filter_ctx_by_world()` 会走保守分支。
+                "ctx_worlds": d.get("ctx_worlds"),
                 "anchor": d.get("anchor", 0.0),
                 "score": round(score, 3),
             })

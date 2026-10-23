@@ -121,6 +121,27 @@ _PLACE_NEG = re.compile(r'(想去|去过|没去|不在|离开|走了|回来|回�
 #: 「想 / 关心 / 说」这类动词一旦跟在地点前面，就说明不是在说身处何地。
 _PLACE_THINK = re.compile(r'(想|关心|猜|觉得|在意|惦记|担心)\S{0,4}$')
 
+# ---------------------------------------------------------------
+# 离场：只有进入没有退出，状态会一直卡在「同处一室」（R-05）
+# ---------------------------------------------------------------
+#: 明确离开的表述。只认**明确的**离开：回家、走了、先回去、道别。
+#: 不认「走了吗」「该回去了吗」这类疑问——它们先被疑问检查挡掉。
+#: 也不认单字「走」：「走神」「走开一下」不是离场。
+#:
+#: 「再见 / 晚安 / 下次再聊」也收进来：它们不是空间陈述，但在这套设定里
+#: 等于宣告这次相处结束。**不收**「拜拜」以外的拟声词，也没有收「嗯」这类
+#: 应答——分不清是同意还是道别的话，宁可不更新（CHAT-013 末条）。
+_LEAVE = re.compile(
+    r'(我(先|就|要|得|也)?(回家|回去|走了|离开|出去了|出门了)|'
+    r'我(也)?不(在|留)了|下次再聊|改天聊|我先去忙|下了|晚安|'
+    r'^\s*再见|^\s*拜拜|^\s*那我(先)?(走|回去|下线))')
+#: 括号内写明主语是用户：括号动作默认是她，但「我…」写明了就不是。
+#: 「我」后面允许少量字再接动作（「我把眼镜摘下来」「我合上书」）。
+_USER_SUBJECT = re.compile(r'^\s*我')
+#: 她说的话里出现「我」通常是她自己（「（我合上书）」是她合上）。
+#: 但「我到活动室了」这类空间表述说的是**用户**在不在，不能算她到了。
+#: 所以空间判断在处理她的回复时整段跳过，见 `update_from_reply`。
+
 
 def _bracket_actions(text: str) -> list[str]:
     return [m.group(1) for m in _BRACKET.finditer(text or "")]
@@ -166,23 +187,42 @@ def _last_action(part: str, off_pat: re.Pattern, on_pat: re.Pattern,
     return cands[-1][1]
 
 
-def parse_updates(user_text: str) -> tuple[dict, list[str]]:
-    """从用户这一轮的话里读出场景状态变化。
+def parse_updates(user_text: str, *, from_reply: bool = False
+                  ) -> tuple[dict, list[str]]:
+    """从这一轮的话里读出场景状态变化。
 
     返回 `(更新, 命中说明)`。更新里只包含**确定**要改的项。
 
-    只看两处：
-      1. 用户消息里的括号动作 —— 按 CHAT-007，括号里是**她**的动作；
-      2. 用户消息里的明确空间表述 —— 判断是否进入共同场景。
+    看三处：
+      1. 括号动作 —— 按 CHAT-007，括号里默认是**她**的动作。
+         但括号里写明主语是「我」时除外：那是用户在描述自己（R-05）。
+      2. 明确的空间表述 —— 判断是否进入共同场景。**只在用户说的时候看**：
+         她说「我到活动室了」不代表用户到了。
+      3. 明确的离场表述 —— 把同处一室置回（R-05）。进出都要有，否则
+         一旦置上就永远卡在「同一个空间」。
 
     用户正文里的「我摘了眼镜」**不**会改她的状态，因为不走 1 的路。
-    这一条由 `test_scene.py::test_08` 钉住。
+    这一条由 `test_scene.py::test_02` 钉住。
+
+    `from_reply=True` 表示这句话是**她**说的（assistant 已完成的回复）：
+    括号动作照样算她的，但空间/离场一律不算——那两件事说的是用户在哪。
     """
     updates: dict = {}
     notes: list[str] = []
     text = user_text or ""
 
+    # 整条消息里提过什么宾语。**跨括号累积**：一条回复可能是
+    # 「（把眼镜摘下来）……（又戴上了）」，宾语在第一个括号里提过，
+    # 第二个括号只写「又戴上了」。若按单个括号算 `seen_object`，
+    # 第二个括号就不会被认出来，最终状态停在「摘下」——正好是反的。
+    seen_glasses = bool(_GLASSES_OFF.search(text) or _GLASSES_ON.search(text))
+    seen_book = bool(_BOOK_CLOSE.search(text) or _BOOK_OPEN.search(text))
+
     for action in _bracket_actions(text):
+        # 括号里写明「我」= 用户在说自己的动作，不是她的（R-05）。
+        # CHAT-007 的「默认是她」不等于「永远是她」。
+        if _USER_SUBJECT.match(action):
+            continue
         # 只判断**括号里边**的内容：「（不用在意）戴上眼镜」里那个「不用」
         # 是对「在意」的否定，不是对「戴」的否定。整段一起判断会把它当成
         # 「不要戴」，于是这句本该更新状态的陈述被跳过。
@@ -192,9 +232,6 @@ def parse_updates(user_text: str) -> tuple[dict, list[str]]:
         # 取**最后一个**明确动作作为结果——动作有先后，后发生的才是当前状态。
         # 不切开就会两个模式都命中，按 elif 顺序取到先出现的那个，正好取反。
         parts = [p for p in re.split(r"[，,；;]", action) if p.strip()]
-        # 这一段括号里提过什么宾语。只在提过时才认省略宾语的重复动作。
-        seen_glasses = bool(_GLASSES_OFF.search(action) or _GLASSES_ON.search(action))
-        seen_book = bool(_BOOK_CLOSE.search(action) or _BOOK_OPEN.search(action))
         for part in parts:
             if not _safe_clause(part):
                 continue
@@ -204,6 +241,9 @@ def parse_updates(user_text: str) -> tuple[dict, list[str]]:
             g = _last_action(part, _GLASSES_OFF, _GLASSES_ON, seen_glasses,
                              _REPEAT_GLASSES_OFF, _REPEAT_GLASSES_ON)
             if g is not None:
+                # **覆盖而不是跳过**：一条回复里可能有多个括号
+                # （「（把眼镜摘下来）……（又戴上了）」），后一个才是最终状态。
+                # 写成 setdefault 或只在没设过时赋值，就会停在第一个动作上。
                 updates["glasses"] = g
                 notes.append(f"括号动作「{part}」→ {'戴上' if g else '摘下'}眼镜")
             b = _last_action(part, _BOOK_CLOSE, _BOOK_OPEN, seen_book,
@@ -212,12 +252,33 @@ def parse_updates(user_text: str) -> tuple[dict, list[str]]:
                 updates["book"] = b
                 notes.append(f"括号动作「{part}」→ {'翻开' if b else '合上'}书")
 
-    # 共同场景：要具体地点 + 到达表述，且整句不是疑问/否定。
+    # 空间相关的判断只在**用户**说话时做：她说的「我到活动室了」
+    # 说的是故事里的人，不是屏幕前的用户。
+    if from_reply:
+        return updates, notes
+
     body = _BRACKET.sub(" ", text)
+    # 疑问要**在切句之前**判断：先按问号切开，切出来的每段都不含问号，
+    # 后面的疑问检查就再也看不到它了（R-05 的「我到活动室了？」就是这样漏的）。
+    if _QUESTION.search(body):
+        # 整条都是疑问句时不做空间更新；但括号动作已经在上面处理过，
+        # 不受影响（「（摘下眼镜）你在吗」仍然算摘下）。
+        return updates, notes
+
     for clause in re.split(r"[，。！？!?；;\n]", body):
         clause = clause.strip()
         if not clause or not _safe_clause(clause):
             continue
+
+        # 离场优先于入场：同一句里既说到了某地又说要走时，以「离开」为准。
+        # 注意这里**不**用 `_PLACE_NEG` 过滤——那个正则本身就把「走了」「回去」
+        # 当成「不是到达」的标记，用它来判断「是不是离场」会互相打架。
+        if _LEAVE.search(clause):
+            if updates.get("together") is not False:
+                updates["together"] = False
+                notes.append(f"「{clause}」→ 离开共同场景")
+            continue
+
         m = _PLACE.search(clause)
         if not m or not _arrived(clause, m):
             continue
@@ -277,6 +338,18 @@ class Scene:
         updates, notes = parse_updates(user_text)
         return self.apply(updates), notes
 
+    def update_from_reply(self, reply_text: str) -> tuple[list[str], list[str]]:
+        """她说完一条回复之后，把她自己的动作记进状态（R-05）。
+
+        为什么要有这一条：状态原来只从**用户这句话**更新，于是她说
+        「（把眼镜摘下来）」之后，下一轮 prompt 里仍然是「戴着眼镜」——
+        V-CONT-04 要求的「她说摘下 → 下一轮记住」根本没接通。
+
+        只处理括号动作：空间与离场说的是**用户**在哪，不能从她的回复里读。
+        """
+        updates, notes = parse_updates(reply_text, from_reply=True)
+        return self.apply(updates), notes
+
     def known(self) -> dict:
         return {k: v for k, v in self.state.items() if v is not None}
 
@@ -306,6 +379,9 @@ class SceneRegistry:
 
     def update_from(self, world: str, user_text: str) -> tuple[list[str], list[str]]:
         return self.get(world).update_from(user_text)
+
+    def update_from_reply(self, world: str, reply_text: str) -> tuple[list[str], list[str]]:
+        return self.get(world).update_from_reply(reply_text)
 
     def reset(self, world: str | None = None):
         for w in ([world] if world else WORLDS):

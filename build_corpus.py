@@ -134,16 +134,37 @@ def main():
                 lo = max(0, i - args.context)
                 hi = min(n - 1, i + args.context)
                 ctx_lines = []
+                ctx_worlds = []
                 for j in range(lo, hi + 1):
                     mark = "▶" if j == i else " "
                     ctx_lines.append(
                         f"{mark}{ts_show(rows[j]['start'])}  {rows[j]['text'].replace(chr(10), ' ')}"
                     )
+                    # 逐行记世界归属（R-01 / WORLD-001-B）。
+                    #
+                    # 为什么要在**建索引时**标，而不是渲染时再算：
+                    # 上下文窗口天然会跨过世界切点——《消失》切点附近的 10 个
+                    # 窗口、30 行会横跨两个世界。渲染层只有拿到「这一行属于谁」
+                    # 才能逐行裁掉；靠事后按时间码反查，一来要再扫全表，
+                    # 二来一旦切点规则变了（WORLD-002-B 审计之后很可能变），
+                    # 渲染层就会拿到旧结论。归属跟着数据走，规则只在一处。
+                    if is_movie and movie_cut is not None:
+                        ctx_worlds.append(
+                            WORLD_CRASH if ts_sec(rows[j]["start"]) >= movie_cut
+                            else WORLD_NORMAL)
+                    else:
+                        ctx_worlds.append(WORLD_NORMAL)
                 ctx = "\n".join(ctx_lines)
 
                 # 检索单元: 上下文窗口 + 本句。
                 # 本句重复两遍是为了让 BM25 更偏向「这一句本身」而非上下文。
-                text = f"{ctx}\n{ctx_lines[i - lo].lstrip('▶ ').strip()}"
+                #
+                # **检索文本也按世界裁**：只留本世界的上下文行。
+                # 否则另一世界的措辞会把记录「拽」进结果（检索层看到的
+                # 是污染过的文本），那是渲染层再裁也补不回来的。
+                keep = [k for k, w in enumerate(ctx_worlds) if w == world]
+                bm25_ctx = "\n".join(ctx_lines[k] for k in keep)
+                text = f"{bm25_ctx}\n{ctx_lines[i - lo].lstrip('▶ ').strip()}"
                 doc = {
                     "id": f"{ep}:{i}",
                     "ep": ep,
@@ -153,7 +174,10 @@ def main():
                     "t": round(t_sec, 1),
                     "world": world,
                     "text": r["text"],
+                    # ctx 保留**全部**原文（原文一条不删，DEC-002），
+                    # 只加一行 ctx_worlds 说明每行归谁。渲染时据此裁剪。
                     "ctx": ctx,
+                    "ctx_worlds": ctx_worlds,
                     "anchor": round(anchor_score(ctx), 2),
                     "bm25": text,
                 }

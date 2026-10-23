@@ -1422,22 +1422,39 @@
     const inp = document.createElement("input");
     inp.placeholder = "记一件你们两个之间的事（只写这条，不用写「她应该……」）";
     inp.id = "mem-input";
+    // 主体（R-07）：默认记「对方的事」，但也可以记她自己的事。
+    // 不让人选的话，「她怕黑」和「你怕黑」会被记成一模一样的东西，
+    // 她那边的提示词也就没法区分。
+    const who = document.createElement("select");
+    who.id = "mem-subject";
+    who.innerHTML = '<option value="user">对方的事</option>' +
+                    '<option value="yuki">她自己的事</option>' +
+                    '<option value="together">你们一起</option>';
     const btn = document.createElement("button");
     btn.textContent = "记下";
     btn.onclick = async () => {
       const text = inp.value.trim();
       if(!text) return;
       btn.disabled = true;
-      try{ await memCall({op:"add", text, subject:"user"}); await paintMemory(); }
+      try{ await memCall({op:"add", text, subject: who.value || "user"}); await paintMemory(); }
       catch(e){ alert(e.message); btn.disabled = false; }
     };
     inp.addEventListener("keydown", e => { if(e.key === "Enter") btn.click(); });
-    add.appendChild(inp); add.appendChild(btn);
+    add.appendChild(who); add.appendChild(inp); add.appendChild(btn);
     body.appendChild(add);
 
     const active = d.records.filter(r => r.status === "active").slice().reverse();
     const retired = d.records.filter(r => r.status !== "active").slice().reverse();
-    if(!active.length) body.innerHTML += '<p class="note">还没有记下任何事。她说的话不会凭空多出记忆。</p>';
+    // 空状态说明必须用 appendChild 加，**不能**写 `body.innerHTML += …`：
+    // innerHTML 赋值会把已有子节点全部重建，上面刚绑在输入框与「记下」按钮上的
+    // onclick / keydown 会一起丢掉，于是空库里点「记下」毫无反应，
+    // 第一条记忆永远存不进去（R-02，真实浏览器复现过）。
+    if(!active.length){
+      const empty = document.createElement("p");
+      empty.className = "note";
+      empty.textContent = "还没有记下任何事。她说的话不会凭空多出记忆。";
+      body.appendChild(empty);
+    }
     active.forEach(r => body.appendChild(memRow(r, false)));
     if(retired.length){
       const t = document.createElement("div");
@@ -1479,7 +1496,18 @@
     mt.className = "mt";
     const rev = r.revision > 1 ? ` · v${r.revision}` : "";
     const by = r.revises ? ' · <span class="tag">纠正了旧的一条</span>' : "";
-    mt.innerHTML = `${escapeHtml((r.created || "").replace("T", " "))}${rev}${by}`;
+    // 主体与来源（R-07）。不显示的话，「这是谁的事」「是不是我亲口说的」
+    // 只能靠记忆文本自己去猜；而提示词那边已经按主体分别渲染了，
+    // 界面不显示就等于让人无法核对模型看到的是什么。
+    const SUBJ = {user: "对方的事", yuki: "她自己的事",
+                  together: "你们一起", world: "这边的事"};
+    const subj = SUBJ[r.subject] || "对方的事";
+    const srcKind = (r.source && (r.source.kind || r.source)) || "";
+    const SRC = {summary: "对话摘要", inferred: "推断", model: "对话摘要"};
+    const src = SRC[String(srcKind).toLowerCase()]
+      ? ` · <span class="tag warn">${escapeHtml(SRC[String(srcKind).toLowerCase()])}</span>` : "";
+    mt.innerHTML = `${escapeHtml((r.created || "").replace("T", " "))}${rev}` +
+      ` · <span class="tag">${escapeHtml(subj)}</span>${src}${by}`;
     meta.appendChild(mt);
 
     const ops = document.createElement("div");
@@ -1672,7 +1700,14 @@
           `${escapeHtml(h.ep_title)} ${escapeHtml(h.start)} · ${h.score}<br>${escapeHtml(h.text)}`;
         hits.appendChild(d2);
       });
-      if(!d.hits.length) hits.innerHTML += '<div class="hit">没有命中。她会凭人格回答，不会有原作依据。</div>';
+      if(!d.hits.length){
+        // 同 R-02：`innerHTML +=` 会重建 hits 下的子节点。这里眼下没有绑定
+        // 事件，但同一个坑已经害过一次，不要留第二种写法。
+        const none = document.createElement("div");
+        none.className = "hit";
+        none.textContent = "没有命中。她会凭人格回答，不会有原作依据。";
+        hits.appendChild(none);
+      }
       box.appendChild(hits);
 
       // 场景状态（CHAT-013）：她这侧「此刻」记着什么。

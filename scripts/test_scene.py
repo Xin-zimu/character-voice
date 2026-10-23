@@ -245,6 +245,77 @@ class SceneStateTests(unittest.TestCase):
         self.assertIs(reg.get("crash").state["glasses"], False)   # 崩溃世界没被重置
 
 
+class HerOwnActionTests(unittest.TestCase):
+    """她说的话也要能改状态（R-05，CHAT-013-B / P5）。
+
+    原来状态**只从用户这句话**更新，于是「（把眼镜摘下来）」由她说出口时，
+    下一轮状态仍是「戴着眼镜」——V-CONT-04 要求的「她说摘下 → 下一轮记住」
+    根本没接通。实测复现过（reviews/2026-10-23-zip-merge-review.md R-05）。
+    """
+
+    def test_r05a_assistant_action_updates_state(self):
+        """她说完「（把眼镜摘下来）」，状态就要变。"""
+        reg = scene.SceneRegistry()
+        reg.get("crash").apply({"glasses": True})
+        changed, _ = reg.update_from_reply("crash", "（把眼镜摘下来）")
+        self.assertIn("glasses", changed)
+        self.assertIs(reg.get("crash").state["glasses"], False)
+
+    def test_r05b_assistant_body_does_not_set_user_place(self):
+        """她说「我到活动室了」不代表**用户**到了，不能置 together。"""
+        reg = scene.SceneRegistry()
+        changed, _ = reg.update_from_reply("normal", "我到活动室了。")
+        self.assertNotIn("together", changed)
+        self.assertIs(reg.get("normal").state["together"], False)
+
+    def test_r05c_reply_question_does_not_update(self):
+        """她反问「（要我把书合上吗）」不更新状态。"""
+        reg = scene.SceneRegistry()
+        changed, _ = reg.update_from_reply("normal", "（要我把书合上吗）")
+        self.assertEqual(changed, [])
+
+    def test_r05d_user_bracket_with_explicit_subject_is_not_hers(self):
+        """用户括号里的「我」说明主体是用户，不该改她的状态。
+
+        CHAT-007 说「括号动作默认是她」，但「默认」不等于「永远」：
+        `（我把眼镜摘下来）` 主语写明了是用户，再算到她头上就是把两个人搞混。
+        这一条与 test_01 不冲突：那条没有主语，走默认。
+        """
+        for text in ("（我把眼镜摘下来）", "（我合上书）", "（我把书合上）"):
+            up, _ = scene.parse_updates(text)
+            self.assertEqual(up, {}, f"「{text}」是用户自己的动作，不该改她的状态")
+
+    def test_r05e_question_mark_in_body_blocks_together(self):
+        """「我到活动室了？」是疑问，不能置 together。
+
+        原实现先按 `？` 切句，切完每个小句都不含问号，疑问检查就失效了。
+        """
+        reg = scene.SceneRegistry()
+        changed, _ = reg.update_from("normal", "我到活动室了？")
+        self.assertNotIn("together", changed)
+        self.assertIs(reg.get("normal").state["together"], False)
+
+    def test_r05f_leaving_clears_together(self):
+        """进入共同场景后明确说离开，要把 together 置回。"""
+        for leave in ("我回家了", "我先回去了", "我要走了", "我走了", "再见"):
+            reg = scene.SceneRegistry()
+            reg.update_from("normal", "我到活动室了")
+            self.assertIs(reg.get("normal").state["together"], True,
+                          "前置条件：先说到了活动室")
+            changed, _ = reg.update_from("normal", leave)
+            self.assertIn("together", changed, f"「{leave}」应当让她知道人已经离开")
+            self.assertIs(reg.get("normal").state["together"], False,
+                          f"「{leave}」之后不该还是同处一室")
+
+    def test_r05g_leaving_question_still_does_not_clear(self):
+        """「我该回去了吗？」是疑问，不当作真的离开。"""
+        reg = scene.SceneRegistry()
+        reg.update_from("normal", "我到活动室了")
+        changed, _ = reg.update_from("normal", "我该回去了吗？")
+        self.assertNotIn("together", changed)
+        self.assertIs(reg.get("normal").state["together"], True)
+
+
 class PromptWiringTests(unittest.TestCase):
     """场景状态进 prompt 的形状。"""
 

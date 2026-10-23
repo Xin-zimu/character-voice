@@ -478,6 +478,81 @@ def m_art_no_right_edge_check(src):
     return src.replace(marker, '            if False:', 1)
 
 
+# ---------------------------------------------------------------
+# B1～B4 修复的反向变异（2026-10-23）
+#
+# 每修一条缺陷，都要让它**能被改回去**：只加修复不加变异，
+# 等于假设「以后没人会改坏它」，而那从来不是真的。
+# ---------------------------------------------------------------
+def m_ctx_not_filtered_by_world(src):
+    """渲染时把整段 ctx 原样输出 —— 上下文行又跨世界（R-01 反向）。"""
+    marker = '        ctx = filter_ctx_by_world(h.get("ctx", ""), h.get("ctx_worlds"), world)'
+    assert marker in src, '变异失效：render_hits 里找不到逐行过滤那一行'
+    return src.replace(marker, '        ctx = h.get("ctx", "")', 1)
+
+
+def m_scene_bitwise_lock_only(src):
+    """进程内锁退回实例字段 —— 多实例并发又静默丢记录（R-04 反向）。
+
+    改的是按路径共享的那把锁：让它每次返回新锁，等价于原来
+    「每个实例自己一把锁」，两个 store 之间就不再互斥。
+    """
+    marker = '        lock = _LOCKS.get(key)'
+    assert marker in src, '变异失效：_lock_for 里找不到查表那一行'
+    return src.replace(marker, '        lock = None', 1)
+
+
+def m_restore_only_direct_successor(src):
+    """恢复只看直接后继 —— 三代链会留下互斥版本（R-03 反向）。"""
+    marker = '            chain = self._chain_of(data["records"], rid)'
+    assert marker in src, '变异失效：restore 里找不到取整条链那一行'
+    return src.replace(marker, '            chain = [rid, rec.get("retired_by") or rid]', 1)
+
+
+def m_backup_failure_swallowed(src):
+    """备份失败又吞掉 —— 用户以为有备份，其实没有（R-06 反向）。"""
+    marker = '                    warn = f"备份失败（主记录已保存，但没有新的 .bak）：{e}"'
+    assert marker in src, '变异失效：_save_raw 里找不到备份失败警告那一行'
+    return src.replace(marker, '                    warn = None', 1)
+
+
+def m_memory_subject_dropped(src):
+    """共同经历渲染时不再标主体 —— 分不清「你记得我」和「我记得你」（R-07 反向）。"""
+    marker = '        block = f"[{i}] {when} · {subject}：{r.get(\'text\', \'\')}{mark}"'
+    assert marker in src, '变异失效：render_shared_memory 里找不到带主体的那行'
+    return src.replace(
+        marker, '        block = f"[{i}] {when} · {r.get(\'text\', \'\')}"', 1)
+
+
+def m_scene_reply_not_consumed(src):
+    """她的回复不再更新状态 —— 说了摘下眼镜，下一轮还戴着（R-05 反向）。"""
+    marker = '            self._commit_reply_scene(composed["world"], "".join(reply_parts))'
+    assert marker in src, '变异失效：api_chat 里找不到收尾那一行'
+    return src.replace(marker, '            pass  # 变异：不再消费她的动作', 1)
+
+
+def m_art_exception_removed(src):
+    """把「格式例外」那段从 ART_PROMPT 删掉 —— 与「不要分段」又打架（R-08 反向）。"""
+    start_marker = '- **格式上的例外，只针对图案本身**'
+    assert start_marker in src, '变异失效：ART_PROMPT 里找不到例外说明的开头'
+    start = src.index(start_marker)
+    # 这一段占三行（到「为准。」结束），按行删干净，不要留下半句。
+    end = src.index('- 画的时候，图案单独占几行', start)
+    return src[:start] + src[end:]
+
+
+def m_empty_memory_rewrites_parent(src):
+    """空状态说明改回 `innerHTML +=` —— 空库第一条又存不进去（R-02 反向）。"""
+    marker = ('      const empty = document.createElement("p");\n'
+              '      empty.className = "note";\n'
+              '      empty.textContent = "还没有记下任何事。她说的话不会凭空多出记忆。";\n'
+              '      body.appendChild(empty);')
+    assert marker in src, '变异失效：paintMemory 里找不到空状态那段'
+    repl = ("      body.innerHTML += '<p class=\"note\">还没有记下任何事。"
+            "她说的话不会凭空多出记忆。</p>';")
+    return src.replace(marker, repl, 1)
+
+
 def m_example_invents_weather(card):
     """示例又编造天气 —— 规则说「绝不编造」，第一条示例却在编。"""
     key = '今天天气怎么样'
@@ -639,6 +714,23 @@ MUTATIONS = [
      m_seed_dead_rule_back, 'backend'),
     ('M51', '前端 checkArt 的组合字符退回只查 0300-036f', 'web/index.html',
      m_frontend_combining_narrow, 'frontend'),
+    # B1～B4 修复的反向变异（2026-10-23）：每修一条都要证明它能被改回去
+    ('M52', 'R-01 反向：上下文整段输出，不再逐行按世界过滤', 'prompt_builder.py',
+     m_ctx_not_filtered_by_world, 'backend'),
+    ('M53', 'R-02 反向：空状态说明改回 innerHTML +=（冲掉已绑定的处理器）', 'web/index.html',
+     m_empty_memory_rewrites_parent, 'frontend'),
+    ('M54', 'R-03 反向：恢复只看直接后继（三代链留下互斥版本）', 'memory.py',
+     m_restore_only_direct_successor, 'backend'),
+    ('M55', 'R-04 反向：进程内锁退回每个实例一把', 'memory.py',
+     m_scene_bitwise_lock_only, 'backend'),
+    ('M56', 'R-06 反向：备份失败又被吞掉', 'memory.py',
+     m_backup_failure_swallowed, 'backend'),
+    ('M57', 'R-05 反向：她的回复不再更新场景状态', 'server.py',
+     m_scene_reply_not_consumed, 'backend'),
+    ('M58', 'R-07 反向：共同经历不再标主体与来源', 'prompt_builder.py',
+     m_memory_subject_dropped, 'backend'),
+    ('M59', 'R-08 反向：删掉字符画的格式例外说明', 'prompt_builder.py',
+     m_art_exception_removed, 'backend'),
 ]
 
 
