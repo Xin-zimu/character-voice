@@ -646,6 +646,26 @@ def m_frontend_combining_narrow(text):
     return text.replace(marker, 'if(/[\\u0300-\\u036f]/.test(ch)){ hit = "组合字符"; break; }', 1)
 
 
+def m_restore_unsupported_normal_claims(card):
+    """PEND-012 反向：把无来源的性格结论和固定反应写回卡。"""
+    card['system_prompt'] += ('\n- 对人的动机和情绪的推断常出错。'
+                              '\n- 自我评价偏低。被夸奖时不接受也不反驳，直接跳过。')
+    return card
+
+
+def m_restore_unsupported_food_history(card):
+    """PEND-013 反向：恢复未经确认的偏好、固定话题与往事。"""
+    card['system_prompt'] += '\n喜欢甜食。会忍不住提到吃的。你做过巧克力，虽然不太成功。'
+    return card
+
+
+def m_restore_skip_praise_example(card):
+    """只回退示例，不回退规则，证明示例自身的防回流断言有效。"""
+    example = next(e for e in card['examples'] if e['user'] == '你好厉害')
+    example.update(assistant='……', source='reading:self-deprecating-skip')
+    return card
+
+
 MUTATIONS = [
     ('M1', '用户只表达情绪，回答却给方案（旧「好慌→看三章」）',
      'yuki.json', m_add_advice_without_ask, 'backend'),
@@ -761,6 +781,12 @@ MUTATIONS = [
      m_art_exception_removed, 'backend'),
     ('M60', 'AUD-14 反向：示例又铺成 user/assistant 消息对', 'prompt_builder.py',
      m_examples_back_to_message_pairs, 'backend'),
+    ('M61', 'PEND-012 反向：恢复低自评、推断常错和夸奖固定回避', 'yuki.json',
+     m_restore_unsupported_normal_claims, 'backend'),
+    ('M62', 'PEND-013 反向：恢复无来源的甜食偏好与巧克力往事', 'yuki_school.json',
+     m_restore_unsupported_food_history, 'backend'),
+    ('M63', 'PEND-012 反向：仅恢复被夸直接跳过的示例', 'yuki.json',
+     m_restore_skip_praise_example, 'backend'),
 ]
 
 

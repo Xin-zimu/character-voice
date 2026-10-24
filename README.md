@@ -176,7 +176,7 @@ py scripts/test_textart.py
 py scripts/verify_sources.py
 ```
 
-当前基线（2026-10-23）：语料 13070 条，自检 0 错误，前端 64 项、后端 53 项、场景 26 项、字符画 42 项通过，来源核对 1 条 `verified:` 标签全部对上，变异检查 51/51 报红。历史基线见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+当前基线（2026-10-24）：语料 13070 条，自检 0 错误，前端 67 项、后端 66 项（桥运行时跳过的不可用分支另补跑通过）、场景 33 项、字符画 42 项通过，来源核对 1 条 `verified:` 标签全部对上。本轮在隔离副本验证 5 项变异，未重跑全部 63 项；历史基线见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 真实试聊用 `scripts/live_chat.py`（走可选后端或自己的 Key），记录写到 `out/live-chat-<时间戳>.md`。
 
@@ -211,7 +211,7 @@ character-voice/
 
 完整清单与状态见 [docs/STATUS.md](docs/STATUS.md)。摘要：
 
-- **真实试聊发现的未修问题**：模型会把未提供的原因说成事实（L-01）；Qoder 桥已可用，完整效果验收仍未完成，见 [复测记录](docs/reviews/2026-10-23-qoder-recheck.md)。先前 R-01～R-08 工程缺陷已修，详见 [STATUS](docs/STATUS.md)
+- **真实试聊发现的未修问题**：删除未经确认的默认设定后，模型仍会补出无依据的生活习惯（L-02）；Qoder 桥已可用，完整效果验收仍未完成，见 [有限对照记录](docs/reviews/2026-10-24-persona-pending-cleanup.md)。先前 L-01 已由 AUD-14 处理，R-01～R-08 工程缺陷已修，详见 [STATUS](docs/STATUS.md)
 - **L2 人工标注**：13070 条里只有 10 句人工核定过
 - **场景状态的更多项**：目前只跟踪眼镜、书、是否同处一室三项；再加一项要同时改解析、默认值、给模型看的说法和回归
 - **记忆的自动抽取**：现在是手动记；已确认参考高 star 项目的抽取与来源追溯思路，但自动抽取仍待开发（PEND-008、PLAN §15.2）

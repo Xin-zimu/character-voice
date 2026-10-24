@@ -1,5 +1,8 @@
 # 示例来源标签的依据表（AUD-10）
 
+> 最近更新：2026-10-24
+> 下文 §一～五保留 2026-10-23 的核查与处理经过；PEND-012 落地后的当前变化见 §六。
+
 > 起因：`personas/*.json` 的 `examples[].source` 标签能通过格式检查，但**标签本身没有出处**。
 > `wiki:emotions-understated` 这种写法看起来像“有据可查”，实际上既没有网页链接、也没有集数与时间码。
 > 这一页只做一件事：**把每个非 `handwritten` 标签逐条追到语料里能定位的原句，追不到就如实记“无依据”**。
@@ -69,3 +72,9 @@ py scripts/verify_sources.py
 # 只想看溯源分布
 py scripts/check_persona.py | grep 溯源
 ```
+
+## 六、PEND-012 落地后的示例变化（2026-10-24）
+
+主线「你好厉害 → ……」及 `reading:self-deprecating-skip` 已替换为「你好厉害 → ……谢谢。」、`handwritten:praise-without-self-deprecation`。依据是 DEC-016：移除低自评和被夸固定回避。新句是按项目表达规则写的一种允许回应，**不是原作台词，也不是每次必须说谢谢**。
+
+§二的旧行保留为来源审计历史，§三「被夸不接仍由规则要求」的理由对这条已不再适用。当前非手写示例共 5 条：`verified:` 1 条、`reading:` 4 条；其他来源标签没有改动。`verified:` 仍经逐字核对通过。

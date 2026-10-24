@@ -650,6 +650,39 @@ class BackendTests(unittest.TestCase):
                 self.assertFalse(self.advice_hits(t),
                                  f'判据误判：「{t}」不是给建议')
 
+    def test_12e_unsupported_persona_claims_removed(self):
+        """PEND-012/013：无来源的设定不能经人格卡或示例重新进入实际 prompt。
+
+        这里锁住已删除的具体主张，不声称能判断任意同义改写或角色自然度。
+        同时保留不确定性约束和阅读爱好，避免整段删空也通过。
+        只检查没有历史、检索和记忆的默认配置；不禁止真实聊天谈甜食或夸奖。
+        """
+        cards = server.load_personas()
+        normal = pb.persona_for(cards, 'normal')
+        crash = pb.persona_for(cards, 'crash')
+        for world, persona, removed in (
+            ('normal', normal, ('推断常出错', '自我评价偏低',
+                                '被夸奖时不接受也不反驳，直接跳过')),
+            ('crash', crash, ('喜欢甜食', '忍不住提到吃的', '做过巧克力')),
+        ):
+            sent = pb.build_messages(persona, world, [], [], '在吗')[0]['content']
+            for claim in removed:
+                with self.subTest(world=world, removed=claim):
+                    self.assertNotIn(claim, sent)
+        with self.subTest(check='uncertainty-preserved'):
+            self.assertRegex(normal['system_prompt'], r'推测[^\n]*不当成事实')
+            self.assertIn('不确定', normal['system_prompt'])
+        with self.subTest(check='reading-preserved'):
+            self.assertIn('喜欢看书', crash['system_prompt'])
+        with self.subTest(check='praise-example-replaced'):
+            praise = [e for e in normal['examples'] if e['user'] == '你好厉害']
+            self.assertEqual(len(praise), 1)
+            self.assertNotEqual(praise[0]['assistant'].strip(), '……',
+                                '旧的「被夸直接跳过」示例仍在教模型固定回避')
+            self.assertTrue(praise[0]['source'].startswith('handwritten:'),
+                            '新示例是项目写法，不应继续冒充人物解读的出处')
+            self.assertNotIn('self-deprecating-skip', json.dumps(normal, ensure_ascii=False))
+
     def test_12d_school_card_identity(self):
         """崩溃世界卡的 AUD-13：不得把「任务助手」写进身份，也不得假定用户性别。
 
