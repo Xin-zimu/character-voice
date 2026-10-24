@@ -6,24 +6,90 @@
 是人工审阅查出来的，不是测试。后来 `test_12b` 修的是同一类问题——只认具体文案。
 所以这里把当时手做的变异固化成脚本：**改动人格卡 → 跑测试 → 必须变红 → 还原**。
 
-用法（会临时改 personas/*.json，结束后一定还原；中断也不会留下脏文件）：
+用法（默认复制当前工作文件与测试语料，在临时副本中变异）：
     python3 scripts/mutation_check.py
+    python3 scripts/mutation_check.py --only M7 M60 M61 M62 M63
+
+主工作区不参与变异；不复制共同经历、out、凭据和 Git 数据。
+正常退出或 Ctrl+C 清理副本；强杀进程可能留下临时目录，但不会改坏源文件。
+每项完整测试输出保存在 out/mutation-<时间戳>/，不只保留第一条失败信息。
 
 判据：每个变异都必须让 `scripts/test_backend.py` 失败。若某个变异仍然全绿，
 说明对应的规则没有真正被测试保护，脚本以非 0 退出并在最后列出漏网的编号。
 
 注意：这不是「测试通过」的证据，而是「测试会失败」的证据。两者都要有。
 """
+import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PERSONAS = ROOT / 'personas'
+REPORT_DIR = None
+
+
+def test_env():
+    # 子进程管道在 Windows 也固定 UTF-8；禁写字节码，避免连续变异读到旧缓存。
+    return dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8',
+                PYTHONDONTWRITEBYTECODE='1')
+
+
+def copy_snapshot(source, target):
+    """复制磁盘上的当前文件（包含未提交改动），不依赖 Git，也不使用硬链接。"""
+    source, target = source.resolve(), target.resolve()
+    if target == source or source in target.parents:
+        raise ValueError('变异副本必须在源工作区之外')
+    target.mkdir(parents=True, exist_ok=False)
+    manifest = {}
+
+    def copy_path(src):
+        if src.is_symlink() or getattr(src, 'is_junction', lambda: False)():
+            raise ValueError(f'拒绝复制链接：{src.relative_to(source)}')
+        if src.name == '__pycache__' or src.name.startswith('.'):
+            return
+        rel = src.relative_to(source)
+        if src.is_dir():
+            for child in src.iterdir():
+                copy_path(child)
+        elif src.suffix in {'.py', '.js', '.mjs', '.json', '.jsonl', '.md', '.html', '.css', '.txt'}:
+            dest = target / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            before = hashlib.sha256(src.read_bytes()).hexdigest()
+            shutil.copy2(src, dest)
+            if before != hashlib.sha256(dest.read_bytes()).hexdigest():
+                raise RuntimeError(f'复制时源文件发生变化：{rel}')
+            manifest[rel.as_posix()] = before
+
+    for path in source.iterdir():
+        if path.is_file() and path.suffix in {'.py', '.md', '.mjs'}:
+            copy_path(path)
+    for name in ('personas', 'scripts', 'web', 'docs', 'data/index',
+                 'data/parsed', 'data/_deprecated'):
+        path = source / name
+        if path.exists():
+            copy_path(path)
+    data = source / 'data'
+    if data.exists():
+        for path in data.glob('*.md'):
+            copy_path(path)
+    # 拒绝混合快照。复制过程中有并发编辑就停止，之后的源文件修改不影响副本。
+    for name, digest in manifest.items():
+        if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
+            raise RuntimeError(f'复制时源文件发生变化：{name}')
+    return manifest
+
+
+def save_output(name, output):
+    if REPORT_DIR is not None:
+        (REPORT_DIR / f'{name}.log').write_text(output, encoding='utf-8')
 
 
 def path_of(name):
@@ -151,6 +217,7 @@ def m_broken_bracket_example(d):
     d['examples'].append({'user': '你看完了吗',
                           'assistant': '（把书合上还没有。',
                           'source': 'handwritten'})
+    return d
 
 
 def m_split_system_after_examples(src):
@@ -799,7 +866,7 @@ def run_check_persona():
     误拦，而不是因为括号不配对。
     """
     proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'check_persona.py')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     return proc.returncode == 0, (proc.stdout or '')
 
@@ -812,7 +879,7 @@ def run_backend():
     让「测试失败了」被读成「测试通过了」——变异脚本本身必须避免这种误判。
     """
     proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'test_backend.py')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     out = proc.stdout or ''
     return proc.returncode == 0, out
@@ -828,7 +895,7 @@ def run_scene():
     在报告里是明确的，而不是「反正有人拦住了」。
     """
     proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'test_scene.py')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     return proc.returncode == 0, (proc.stdout or '')
 
@@ -840,7 +907,7 @@ def run_textart():
     单独跑能让报告写清楚「这条规则由哪一层保护」。
     """
     proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'test_textart.py')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     return proc.returncode == 0, (proc.stdout or '')
 
@@ -852,7 +919,7 @@ def run_frontend():
     文档逃逸）。规则层能由 Python 覆盖的，就写 Python 那边，别在这里重跑。
     """
     proc = subprocess.run(['node', str(ROOT / 'scripts' / 'test_frontend.js')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     return proc.returncode == 0, (proc.stdout or '')
 
@@ -865,7 +932,7 @@ def run_sources():
     只有真去索引里逐字比对，才知道标签有没有说真话。
     """
     proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'verify_sources.py')],
-                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace')
     return proc.returncode == 0, (proc.stdout or '')
 
@@ -889,12 +956,12 @@ def _restore(originals, fname, mid):
     """
     if fname not in originals:
         raise SystemExit(f'还原失败：{fname} 不在备份里（变异 {mid}）。'
-                         '工作区可能已被改动，请用 git checkout 还原该文件。')
+                         '副本可能已被改动，请检查本次变异输出。')
     path_of(fname).write_bytes(originals[fname])
 
 
-def main():
-    # 备份到临时目录，任何异常都靠 finally 还原，避免把脏卡留在工作区。
+def run_mutations():
+    # 只由 main 在隔离副本内调用；还原用于让各变异有相同起点。
     backup = Path(tempfile.mkdtemp(prefix='persona-backup-'))
     originals = {}
     # 备份范围**从变体清单派生**，不再手写。手写清单漏一项的后果很重：
@@ -913,11 +980,14 @@ def main():
 
     passed, leaks, broken = 0, [], []
     try:
-        baseline, out = run_backend()
-        if not baseline:
-            print('基线就是红的，先修基线再谈变异：\n' + out[-2000:])
-            return 2
-        print(f'基线：test_backend.py 全绿（{len(MUTATIONS)} 个变异开始）\n')
+        for kind in dict.fromkeys(m[4] for m in MUTATIONS):
+            runner, where = RUNNERS[kind]
+            baseline, out = runner()
+            save_output(f'baseline-{kind}', out)
+            if not baseline:
+                print(f'基线 {where} 就是红的，先修基线再谈变异：\n' + out[-2000:])
+                return 2
+        print(f'所需测试基线全绿（{len(MUTATIONS)} 个变异开始）\n', flush=True)
 
         for mid, desc, fname, mutate, expect in MUTATIONS:
             # 人格卡走 JSON 读写；prompt_builder.py 这类源码变异走文本替换。
@@ -939,7 +1009,11 @@ def main():
                     target.write_text(after, encoding='utf-8', newline='\n')
                 else:
                     raw_before = target.read_bytes()
-                    save(fname, mutate(load(fname)))
+                    changed = mutate(load(fname))
+                    assert isinstance(changed, dict), f'变异 {mid} 未返回人格卡对象'
+                    assert isinstance(changed.get('system_prompt'), str), f'变异 {mid} 损坏 system_prompt'
+                    assert isinstance(changed.get('examples'), list), f'变异 {mid} 损坏 examples'
+                    save(fname, changed)
                     assert target.read_bytes() != raw_before, \
                         f'变异 {mid} 没有改变文件内容'
             except Exception as e:
@@ -957,6 +1031,7 @@ def main():
                 continue
             runner, where = RUNNERS[expect]
             ok, out = runner()
+            save_output(mid, out)
             _restore(originals, fname, mid)
             if ok:
                 leaks.append((mid, desc))
@@ -967,10 +1042,10 @@ def main():
                 # 拦住了也会打印「未捕获到用例名」——看着像没查清楚，
                 # 实际是报告写得不对，这种含糊会让人以为变异没验过。
                 first = next((ln.strip() for ln in out.splitlines()
-                              if 'FAIL:' in ln or 'ERROR:' in ln), '')
+                              if 'FAIL:' in ln or 'ERROR:' in ln or 'AssertionError' in ln), '')
                 if not first:
                     first = next((ln.strip() for ln in out.splitlines()
-                                  if ln.lstrip().startswith('×')), '(未捕获到报错行)')
+                                  if ln.lstrip().startswith(('×', '✗', '✘'))), '(未捕获到报错行，请查完整日志)')
                 print(f'  ✓ {mid} 已拦住：{desc}\n      → {first.strip()}')
                 passed += 1
     finally:
@@ -993,12 +1068,48 @@ def main():
     return 0
 
 
+def main():
+    global ROOT, PERSONAS
+    source, source_personas = ROOT, PERSONAS
+    with tempfile.TemporaryDirectory(prefix='yuki-mutation-') as temp:
+        snapshot = Path(temp) / 'workspace'
+        manifest = copy_snapshot(source, snapshot)
+        if REPORT_DIR is not None:
+            (REPORT_DIR / 'snapshot-sha256.json').write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f'隔离副本：{snapshot}（{len(manifest)} 个文件）', flush=True)
+        try:
+            ROOT, PERSONAS = snapshot, snapshot / 'personas'
+            return run_mutations()
+        finally:
+            ROOT, PERSONAS = source, source_personas
+
+
+def cli():
+    global MUTATIONS, REPORT_DIR
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--only', nargs='+', metavar='M编号', help='只运行所列变异；省略则全量')
+    args = parser.parse_args()
+    if args.only:
+        unknown = set(args.only) - {m[0] for m in MUTATIONS}
+        if unknown:
+            parser.error('未知变异编号：' + ', '.join(sorted(unknown)))
+        MUTATIONS = [m for m in MUTATIONS if m[0] in args.only]
+    REPORT_DIR = ROOT / 'out' / ('mutation-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+    REPORT_DIR.mkdir(parents=True)
+    print(f'完整输出：{REPORT_DIR}', flush=True)
+    return main()
+
+
 if __name__ == '__main__':
     # main() 抛异常时必须返回非 0。否则 CI 只看退出码，会把崩溃读成成功——
     # 复审实测过：让某个变异函数抛 RuntimeError，进程带 traceback 退出但
     # `echo $?` 是 0，后面的变异再没跑过。
     try:
-        sys.exit(main())
+        sys.exit(cli())
+    except KeyboardInterrupt:
+        print('已中断；源工作区未参与变异。', file=sys.stderr)
+        sys.exit(130)
     except Exception:
         import traceback
         traceback.print_exc()
