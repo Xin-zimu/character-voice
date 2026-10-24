@@ -683,6 +683,63 @@ class BackendTests(unittest.TestCase):
                             '新示例是项目写法，不应继续冒充人物解读的出处')
             self.assertNotIn('self-deprecating-skip', json.dumps(normal, ensure_ascii=False))
 
+    def test_12f_unverified_self_history_is_not_asserted(self):
+        """CHAT-019 / DEC-017：关于她自己的经历，没有依据不许说成事实。
+
+        为什么单独一条：`test_12e` 只管「卡里不能写没有依据的设定」，管不到
+        「没写也不能现场编」。36 次采样（docs/reviews/2026-10-24-self-facts-sampling.md）
+        里，问「你以前做过巧克力吗」2/3 承认并补细节，问「最近一次做饭」3/3 作答——
+        卡里已经没有这些内容，说明缺的是**规则**，不是卡里的文字。
+
+        判据（丙）：禁可核查的具体项，允许不承诺的倾向，想不起就说记不清。
+        这里只锁「规则确实进了实际组装结果」和「没有退化成关键词禁令」；
+        不声称能判断任意改写，也不判断她说话自不自然（那是 C 类证据）。
+        """
+        cards = server.load_personas()
+        fake_hit = {'ep': '消失', 'ep_title': '消失', 'start': '0:38:13',
+                    'world': 'normal', 'ctx': '▶测试句', 'ctx_worlds': ['normal']}
+        for world in ('normal', 'crash'):
+            persona = pb.persona_for(cards, world)
+            hit = dict(fake_hit, world=world, ctx_worlds=[world])
+            sent = pb.build_messages(persona, world, [hit], [], '在吗')[0]['content']
+            with self.subTest(world=world, check='self-history-rule'):
+                self.assertIn('关于你自己的经历', sent)
+            with self.subTest(world=world, check='specifics-banned'):
+                # 四个词必须一起出现，避免只留「不要编」这种没有边界的写法。
+                self.assertIn('时间、地点、次数、具体情节', sent)
+            with self.subTest(world=world, check='vague-allowed'):
+                self.assertIn('不承诺的倾向', sent)
+            with self.subTest(world=world, check='recall-answer'):
+                self.assertIn('记不清', sent)
+            with self.subTest(world=world, check='hits-are-not-evidence'):
+                # 检索片段没讲到这件事就等于没有依据。这两句要分开断言：
+                # 「等于没有依据」在自述规则末尾，「拼一个答案」在检索块里，
+                # 只锁其中一句，删掉另一句时测试仍然全绿（M65 一开始就是这么漏的）。
+                # 采样里巧克力/做饭两组的 k=5 命中全是噪声，她照样答了。
+                self.assertIn('等于没有依据', sent)
+                self.assertIn('不要拿它们拼一个答案', sent)
+            with self.subTest(world=world, check='grounded-history-still-allowed'):
+                # 只有禁令会过度抑制：第一版规则上线后，检索里**确实有**的借书卡
+                # 往事也被推成「想不起来了」。所以要同时锁「有依据的照常说」。
+                self.assertIn('有依据的往事照常讲', sent)
+            with self.subTest(world=world, check='present-tense-not-restricted'):
+                # 「选哪本书」「怕什么」不是往事，不该被这条规则压成「记不清」。
+                self.assertIn('这条只管', sent)
+        with self.subTest(check='persona-stance'):
+            self.assertIn('包括关于你自己以前的事', cards['yuki']['system_prompt'])
+            self.assertIn('只说你确实记得的', cards['yuki_school']['system_prompt'])
+        with self.subTest(check='no-keyword-ban'):
+            # DEC-017 明确不新增「甜食」「巧克力」这类词禁：正常聊天会谈到吃的，
+            # 拦词会把「我不太喜欢甜的」这种合法回答也标成违例。
+            guard = cards['yuki_school'].get('guard') or {}
+            for reply, user in (
+                ('甜的东西偶尔会吃。', '你平时是不是特别喜欢甜食？'),
+                ('我不记得做过巧克力。', '你以前自己做过巧克力吗？'),
+            ):
+                self.assertEqual(
+                    check_persona.simulate_check_reply(reply, user, guard), '',
+                    f'正常回答被误判为违例：「{reply}」')
+
     def test_12d_school_card_identity(self):
         """崩溃世界卡的 AUD-13：不得把「任务助手」写进身份，也不得假定用户性别。
 

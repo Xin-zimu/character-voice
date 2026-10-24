@@ -666,6 +666,33 @@ def m_examples_back_to_message_pairs(src):
     return src.replace(old, new, 1)
 
 
+def m_drop_self_history_rule(src):
+    """CHAT-019 反向：删掉「关于你自己的经历」整条规则。
+
+    这条是 36 次采样里唯一指向原因的那一条：卡里已经没有巧克力与做饭，
+    她仍然答得出来，说明缺的是规则。删掉它，`test_12f` 必须红。
+    """
+    marker = '4. **关于你自己的经历，只有记录里有的才能说。**'
+    assert marker in src, '变异失效：找不到关于自己的经历那条规则'
+    start = src.index(marker)
+    end = src.index('**一句话的判据**', start)
+    return src[:start] + src[end:]
+
+
+def m_drop_hits_are_not_evidence(src):
+    """CHAT-019 反向：删掉「检索没有直接讲到就等于没有依据」。
+
+    采样里巧克力、做饭两组的 k=5 命中全是噪声（BM25 把「什么时候」匹配到
+    「他们是什么时候接近的？」），她照样给出具体细节。只留「按字面找出来的」
+    不够，必须写明「没讲到这件事就等于没有依据」。
+    """
+    marker = '- 检索只是按字面相仿找出来的'
+    assert marker in src, '变异失效：找不到检索片段不算依据那一句'
+    start = src.index(marker)
+    end = src.index('- 有关系时', start)
+    return src[:start] + src[end:]
+
+
 def m_example_for_disagreement_removed(card):
     """删掉「意见分歧」示例 —— 规则还在，但没人示范它（AUD-08 反向）。"""
     before = len(card['examples'])
@@ -854,6 +881,10 @@ MUTATIONS = [
      m_restore_unsupported_food_history, 'backend'),
     ('M63', 'PEND-012 反向：仅恢复被夸直接跳过的示例', 'yuki.json',
      m_restore_skip_praise_example, 'backend'),
+    ('M64', 'CHAT-019 反向：删掉「关于你自己的经历」整条规则', 'prompt_builder.py',
+     m_drop_self_history_rule, 'backend'),
+    ('M65', 'CHAT-019 反向：删掉「检索没讲到就等于没有依据」', 'prompt_builder.py',
+     m_drop_hits_are_not_evidence, 'backend'),
 ]
 
 
