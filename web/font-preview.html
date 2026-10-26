@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>字符画字体对照 · YUKI.N</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  font-preview.html — 字符画字体对照（PEND-010 的取证页）
+
+  它做什么：
+    1. 用页面**实际使用的那套 CSS**（字号 14.5px、图案块 letter-spacing 0、
+       line-height 1.35）分别渲染 ASCII 图案、框线、方块、盲文、汉字混排；
+    2. 对每个候选字体量两个**不同**的量：
+         - 排版宽度（advance）：字符在行里占多少位置，决定图案会不会逐格漂移；
+         - 字墨宽度（ink）：字形真正画出来的宽度，决定格子看起来有没有缝。
+       只量前者会得出「每个字一样宽所以没问题」，只量后者会漏掉累计漂移——
+       2026-10-26 的记录只报了 7.97 / 8.50 两个 advance，没区分这两件事。
+    3. 给出每格的差值，以及 20 格累计漂移等于多少个字符格。
+
+  它不做什么：
+    - 不安装字体、不引入 web font、不改 web/index.html 的字体栈。
+      这个页面只是把「换成某个字体会长什么样」摆出来，选哪条仍是 PEND-010 的产品决定。
+    - 不判断「好不好看」。好不好看只能人看。
+
+  为什么用 canvas 量而不是量 DOM：canvas 的 measureText 能同时给 advance 和
+  actualBoundingBoxLeft/Right（字墨范围），DOM 只能给 advance。两者必须分开报。
+-->
+<style>
+  :root{
+    --bg:#0c0e10; --panel:#12161a; --line:#20262b; --text:#c8d3d9; --dim:#6b7a84;
+    --accent:#7fb2c4; --warn:#c47a5a; --ok:#7fae8b;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 30px 90px;background:var(--bg);color:var(--text);
+       font-family:var(--mono);font-size:13px;line-height:1.75;letter-spacing:.02em}
+  h1{font-size:13px;font-weight:500;letter-spacing:.18em;color:var(--accent);margin:0 0 6px}
+  h2{font-size:11.5px;font-weight:500;letter-spacing:.14em;color:var(--text);
+     margin:34px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+  .sub{color:var(--dim);font-size:10.5px;letter-spacing:.06em;margin-bottom:22px}
+  .note{color:var(--dim);font-size:11px;line-height:1.95;margin:0 0 14px;max-width:88ch}
+  .note b{color:var(--text);font-weight:500}
+  code{color:var(--accent);font-size:11px}
+  table{border-collapse:collapse;margin:10px 0 6px;font-size:11.5px}
+  th,td{border-bottom:1px solid var(--line);padding:5px 12px 5px 0;text-align:left;
+        vertical-align:top;white-space:nowrap}
+  th{color:var(--dim);font-weight:400;font-size:10px;letter-spacing:.1em}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .ok{color:var(--ok)} .bad{color:var(--warn)} .dim{color:var(--dim)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:2px;
+        padding:14px 16px;margin:0 0 16px}
+  .card .head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-bottom:10px}
+  .card .name{color:var(--text);font-size:12px}
+  .card .tag{font-size:9.5px;letter-spacing:.1em;padding:1px 7px;border:1px solid var(--line);
+             border-radius:2px;color:var(--dim)}
+  .card .tag.cur{color:var(--accent);border-color:var(--accent)}
+  .samples{display:flex;flex-wrap:wrap;gap:26px}
+  .sample{min-width:0}
+  .sample .cap{color:var(--dim);font-size:9.5px;letter-spacing:.1em;margin-bottom:6px}
+  /* 与 web/index.html 的图案块同一套取值，改那边就要同步改这里 */
+  .art{font-size:14.5px;line-height:1.35;letter-spacing:0;white-space:pre;
+       overflow-x:auto;color:var(--text);text-shadow:0 0 20px rgba(127,178,196,.13)}
+  .art.ls{letter-spacing:.04em}   /* 对照组：父级 .line 的字距一旦漏进图案块会怎样 */
+  .bar{height:8px;background:var(--line);position:relative;margin:3px 0 9px}
+  .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--accent);opacity:.55}
+  .verdict{font-size:11px;margin-top:8px;line-height:1.9}
+  .verdict .k{color:var(--dim);display:inline-block;min-width:88px}
+  button{background:none;border:1px solid var(--line);color:var(--dim);font-family:var(--mono);
+         font-size:10.5px;letter-spacing:.1em;padding:6px 12px;border-radius:2px;cursor:pointer}
+  button:hover{color:var(--accent);border-color:var(--accent)}
+  .toolbar{margin:14px 0 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .hint{color:var(--dim);font-size:10px}
+  textarea{width:100%;height:120px;background:var(--bg);border:1px solid var(--line);
+           color:var(--dim);font-family:var(--mono);font-size:10.5px;padding:8px;border-radius:2px}
+</style>
+</head>
+<body>
+<h1>字符画字体对照</h1>
+<div class="sub">PEND-010 取证页 · 只测量与预览，不安装字体、不替换页面字体栈</div>
+
+<p class="note">
+  这一页把<b>同一段图案</b>用不同字体渲染，并分开报两个量：<b>排版宽度</b>（字符占几个位置，
+  决定图案会不会逐格漂移）与<b>字墨宽度</b>（字形真正画出来多宽，决定格子看起来有没有缝）。
+  2026-10-26 的记录只报了「<code>⣿</code> 8.50px / <code>a</code> 7.97px」这两个排版宽度，
+  据此说「盲文字符格可能错位」并不充分——错位要看<b>累计漂移</b>与<b>字墨是否居中</b>。
+  下面每一行都给出这两个值，以及 20 格之后偏移多少。
+</p>
+<p class="note">
+  <b>方块那一栏要反着读</b>：<code>█░</code> 是当像素用的，相邻两块必须<b>边缘相接</b>才连得成点阵。
+  所以「墨出格」是好事，「格与格之间留缝」才是问题——这一条本页第一版写反了，
+  把 <code>─</code> 这类横线本来跨格连接的字形报成了「有缝」。判据已改成只看正缝。
+</p>
+
+<h2>一 · 当前页面用的那套字体</h2>
+<p class="note" id="cur-note">正在检测……</p>
+<div id="cur"></div>
+
+<h2>二 · 本机可用的候选字体</h2>
+<p class="note">
+  只列<b>本机已安装</b>的等宽字体（按「换用该字体后同一串字的宽度是否变化」探测，
+  不依赖 <code>document.fonts</code>——它对系统字体返回空集，看不出装了什么）。
+  没有安装的候选会列在最后并标「未安装」，它们需要先装字体才能比较，<b>本页不代装</b>。
+</p>
+<div id="cands"></div>
+
+<h2>三 · 四类样本的实际渲染</h2>
+<p class="note">
+  每组左边是<b>正常</b>（字距 0，与 <code>.blk.art</code> 一致），右边是<b>字距 0.04em</b>
+  （父级 <code>.line</code> 的字距漏进图案块时就会变成这样）。这一栏用来回答
+  「混排汉字会不会破坏结构」：<code>雨</code> 若不是正好 2 个 ASCII 格，图案就会内收或外扩。
+</p>
+<div id="samples"></div>
+
+<h2>四 · 量出来的数据</h2>
+<div class="toolbar">
+  <button id="copy">复制 JSON</button>
+  <span class="hint" id="stamp"></span>
+</div>
+<textarea id="json" readonly></textarea>
+
+<script>
+'use strict';
+// 把脚本错误留在页面上，供 scripts/font_preview_check.js 取走。
+// 没有这一段的话，「页面没算完」和「脚本抛异常」在外部看起来一模一样。
+window.__FP_ERRORS__ = [];
+window.addEventListener('error', e => window.__FP_ERRORS__.push(String(e.message || e)));
+window.addEventListener('unhandledrejection', e => window.__FP_ERRORS__.push('rejection: ' + e.reason));
+
+const SIZE = 14.5;                 // 与 web/index.html 的 .line 一致
+const CHARS = ['a', '│', '─', '┌', '█', '░', '⣿', '雨', '　'];
+const N = 20;                      // 累计漂移按 20 格算
+
+// 与 web/index.html 的三类样本同源：ASCII 猫、框线盒、方块书、盲文点阵、汉字混排。
+const SAMPLES = {
+  ascii:  '  /\\_/\\\n ( o.o )\n  > ^ <',
+  box:    '┌──────┐\n│      │\n└──────┘',
+  block:  '██████\n█░░░░█\n█░██░█\n█░░░░█\n██████',
+  braille:'  ⣠⣾⣿⣦⡀\n  ⠙⠿⠿⠿⠋',
+  cjk:    '┌──┐\n│雨│\n└──┘'
+};
+
+// 候选字体：先当前栈，再常见等宽（含带 CJK 的）。名字写错不会报错，
+// 只会被探测成「未安装」，所以这里可以列得宽一点。
+const STACK = 'ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Cascadia Mono",monospace';
+const CANDIDATES = [
+  ['当前页面字体栈', null],                       // null = 直接用 STACK，不做探测
+  ['Consolas'], ['Cascadia Mono'], ['Cascadia Code'], ['Courier New'],
+  ['Lucida Console'], ['Lucida Sans Typewriter'], ['DejaVu Sans Mono'],
+  ['JetBrains Mono'], ['Fira Code'], ['Source Code Pro'], ['Ubuntu Mono'],
+  ['Noto Sans Mono'], ['Noto Sans Mono CJK SC'], ['Noto Sans Mono CJK JP'],
+  ['Sarasa Mono SC'], ['Sarasa Fixed SC'], ['Sarasa Term SC'],
+  ['MS Gothic'], ['MS Mincho'], ['SimSun'], ['NSimSun'], ['SimHei'],
+  ['MingLiU'], ['PMingLiU'], ['Microsoft JhengHei'],
+  ['Source Han Mono SC'], ['Source Han Code JP'], ['Hack'], ['Inconsolata'],
+];
+
+const cv = document.createElement('canvas').getContext('2d');
+function fontOf(family){ return SIZE + 'px ' + family; }
+
+/** 排版宽度与字墨宽度分开取。 */
+function measure(family, text){
+  cv.font = fontOf(family);
+  const m = cv.measureText(text);
+  return {
+    advance: m.width,
+    inkLeft: m.actualBoundingBoxLeft,
+    inkRight: m.actualBoundingBoxRight,
+    ink: m.actualBoundingBoxLeft + m.actualBoundingBoxRight,
+    ascent: m.actualBoundingBoxAscent,
+    descent: m.actualBoundingBoxDescent,
+  };
+}
+
+/** 单个字符的排版宽度：重复 N 次量总宽再除。 */
+function advanceOf(family, ch){
+  cv.font = fontOf(family);
+  return cv.measureText(ch.repeat(N)).width / N;
+}
+
+/** 本机是否装了某个字体：换用后同一串字的宽度是否与两种兜底都不同。 */
+function installed(name){
+  const probe = 'mmmmmmmmmmlliWWWW';
+  cv.font = fontOf('monospace');
+  const a = cv.measureText(probe).width;
+  cv.font = fontOf('serif');
+  const b = cv.measureText(probe).width;
+  cv.font = fontOf('"' + name + '",monospace');
+  const c = cv.measureText(probe).width;
+  cv.font = fontOf('"' + name + '",serif');
+  const d = cv.measureText(probe).width;
+  return (c !== a) || (d !== b);
+}
+
+function pct(x){ return (x * 100).toFixed(1) + '%'; }
+function px(x){ return x.toFixed(2) + 'px'; }
+
+/** 对一个字体名做完整测量，返回结构化结果（后面写进 JSON 供留档）。 */
+function analyse(family, label){
+  const adv = {};
+  for (const ch of CHARS) adv[ch] = advanceOf(family, ch);
+  const ink = {};
+  for (const ch of CHARS){
+    if (ch === '　'){ ink[ch] = null; continue; }   // 全角空格没有字墨，量了也没意义
+    const m = measure(family, ch);
+    ink[ch] = { ink: m.ink, advance: m.advance, ascent: m.ascent, descent: m.descent };
+  }
+  const a = adv['a'];
+  const brailleDrift = (adv['⣿'] - a) * N;          // 20 格之后的绝对偏移
+  const brailleDriftCells = (adv['⣿'] - a) / a * N; // 换成「几个字符格」
+  const cjkRatio = adv['雨'] / a;
+  // 字墨与格宽的差：**正=两侧留缝，负=墨出格**。
+  // 对 `█░` 这类实心方块，墨出格才是对的（相邻两块边缘相接，连成连续点阵）；
+  // 留缝就说明格子之间有空隙，方块画出来是一颗颗分开的。
+  // 早先把 |差| 大一律当问题，等于把「墨略大于格」判成错误——那是判据错，不是字体错。
+  const blockSeam = ink['█'] ? adv['█'] - ink['█'].ink : null;   // >0 才是缝
+  const brailleInk = ink['⣿'] ? ink['⣿'].ink : null;
+  const asciiAligned = ['│', '─', '┌'].every(c => Math.abs(adv[c] - a) < 0.05);
+  const blockAligned = Math.abs(adv['█'] - a) < 0.05 && Math.abs(adv['░'] - a) < 0.05;
+  return {
+    label, family,
+    advance: adv, ink,
+    asciiAligned, blockAligned,
+    brailleDelta: adv['⣿'] - a,
+    brailleDrift, brailleDriftCells,
+    cjkRatio,
+    blockSeam, brailleInk,
+  };
+}
+
+/** 一条判决：只描述测量结果，不写「好不好看」。 */
+function verdictOf(r){
+  const cells = v => (v >= 0 ? '+' : '') + v.toFixed(1) + ' 格';
+  return [
+    ['ASCII', r.asciiAligned ? '<span class="ok">与 a 同宽（对齐）</span>'
+                             : '<span class="bad">与框线不同宽（' + px(r.advance['│'] - r.advance['a']) + '）</span>'],
+    ['框线', r.asciiAligned ? '<span class="ok">│─┌ 都是 1 格</span>'
+                            : '<span class="bad">│─┌ 与 ASCII 不同宽</span>'],
+    ['方块', r.blockAligned
+      ? (r.blockSeam === null ? '<span class="dim">1 格</span>'
+        : (r.blockSeam <= 0.5
+            ? '<span class="ok">1 格，两块之间没有缝（能连成连续点阵）</span>'
+            : '<span class="bad">1 格，但每格之间留 ' + px(r.blockSeam) + ' 的缝（会是一颗颗分开的）</span>'))
+      : '<span class="bad">与 a 不同宽（' + px(r.advance['█'] - r.advance['a']) + '）</span>'],
+    ['盲文', Math.abs(r.brailleDelta) < 0.05
+      ? '<span class="ok">1 格，20 格不漂移</span>'
+      : '<span class="bad">每格差 ' + px(r.brailleDelta) + '，20 格累计 ' + px(Math.abs(r.brailleDrift))
+        + '（' + cells(r.brailleDriftCells) + '）</span>'],
+    ['汉字', Math.abs(r.cjkRatio - 2) < 0.02
+      ? '<span class="ok">正好 2 格（1 : 2 成立）</span>'
+      : '<span class="bad">' + r.cjkRatio.toFixed(2) + ' 格（不是 2），混排会' + (r.cjkRatio < 2 ? '内收' : '外扩') + '</span>'],
+    ['盲文字墨', r.brailleInk === null || r.ink['⣿'] === null ? '—'
+      : '<span class="dim">字墨 ' + px(r.brailleInk) + ' 落在 ' + px(r.advance['⣿'])
+        + ' 的格里；格宽本身' + (Math.abs(r.brailleDelta) < 0.05 ? '与 a 一致' : '比 a 宽 ' + px(r.brailleDelta))
+        + '，所以' + (Math.abs(r.brailleDelta) < 0.05 ? '点阵不会漂移' : '整行会逐格累积偏移') + '</span>'],
+  ];
+}
+
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function sampleNode(family, key, withLs){
+  const wrap = el('div', 'sample');
+  wrap.appendChild(el('div', 'cap', key + (withLs ? ' · 字距 0.04em' : ' · 字距 0')));
+  const pre = el('pre', 'art' + (withLs ? ' ls' : ''), SAMPLES[key]);
+  pre.style.fontFamily = family;
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+function renderCard(r, current){
+  const card = el('div', 'card');
+  const head = el('div', 'head');
+  head.appendChild(el('span', 'name', r.label));
+  if (current) head.appendChild(el('span', 'tag cur', '页面正在用'));
+  head.appendChild(el('span', 'tag', 'a = ' + px(r.advance['a'])));
+  card.appendChild(head);
+
+  // 两个宽度并排画成条：直观看出「排版宽度」和「字墨宽度」不是一个东西。
+  const sampleRow = el('div', 'samples');
+  for (const k of Object.keys(SAMPLES)) sampleRow.appendChild(sampleNode(r.family, k, false));
+  card.appendChild(sampleRow);
+
+  const row2 = el('div', 'samples');
+  for (const k of Object.keys(SAMPLES)) row2.appendChild(sampleNode(r.family, k, true));
+  card.appendChild(row2);
+
+  const v = el('div', 'verdict');
+  for (const [k, text] of verdictOf(r)){
+    const line = el('div');
+    line.appendChild(el('span', 'k', k));
+    line.insertAdjacentHTML('beforeend', text);
+    v.appendChild(line);
+  }
+  card.appendChild(v);
+  return card;
+}
+
+function table(r){
+  const t = el('table');
+  const thead = el('tr');
+  for (const h of ['字符', '排版宽', '字墨宽', '相对 a']) thead.appendChild(el('th', null, h));
+  t.appendChild(thead);
+  for (const ch of CHARS){
+    const tr = el('tr');
+    tr.appendChild(el('td', null, ch));
+    tr.appendChild(el('td', 'num', px(r.advance[ch])));
+    const i = r.ink[ch];
+    tr.appendChild(el('td', 'num', i === null ? '—' : px(i.ink)));
+    tr.appendChild(el('td', 'num', (r.advance[ch] / r.advance['a']).toFixed(2) + ' 格'));
+    t.appendChild(tr);
+  }
+  return t;
+}
+
+function build(){
+  const current = analyse(STACK, '当前页面字体栈');
+  // 当前字体单独放在第一节，并把「它到底解析到哪个物理字体」说清楚：
+  // JS 拿不到「解析结果」，只能说实际测量值，不猜。
+  document.getElementById('cur-note').innerHTML =
+    '字号 <code>' + SIZE + 'px</code>、图案块 <code>letter-spacing: 0</code>、'
+    + '<code>line-height: 1.35</code>。字体栈：<code>' + STACK + '</code>。'
+    + '浏览器最终用哪个物理字体，页面脚本查不到——下面给的是<b>实际测量值</b>，不是字体名。';
+  const curHost = document.getElementById('cur');
+  curHost.appendChild(renderCard(current, true));
+  curHost.appendChild(table(current));
+
+  const host = document.getElementById('cands');
+  const results = [current];
+  const missing = [];
+  for (const [name] of CANDIDATES.slice(1)){
+    if (!installed(name)){ missing.push(name); continue; }
+    const r = analyse('"' + name + '",monospace', name);
+    results.push(r);
+    host.appendChild(renderCard(r, false));
+  }
+  if (missing.length){
+    const p = el('p', 'note');
+    p.innerHTML = '<b>未安装</b>（探测不到，需要先装字体才能比较；本页不代装）：'
+      + missing.map(n => '<code>' + n + '</code>').join('、');
+    host.appendChild(p);
+  }
+
+  const summary = el('table');
+  const h = el('tr');
+  for (const c of ['字体', 'ASCII/框线', '方块', '盲文 20 格漂移', '汉字格数']) h.appendChild(el('th', null, c));
+  summary.appendChild(h);
+  for (const r of results){
+    const tr = el('tr');
+    tr.appendChild(el('td', null, r.label));
+    tr.appendChild(el('td', r.asciiAligned ? 'ok' : 'bad', r.asciiAligned ? '对齐' : '不对齐'));
+    tr.appendChild(el('td', r.blockAligned ? 'ok' : 'bad', r.blockAligned ? '1 格' : '不对齐'));
+    tr.appendChild(el('td', Math.abs(r.brailleDelta) < 0.05 ? 'ok' : 'bad',
+      Math.abs(r.brailleDelta) < 0.05 ? '0' : px(r.brailleDrift) + '（' + r.brailleDriftCells.toFixed(1) + ' 格）'));
+    tr.appendChild(el('td', Math.abs(r.cjkRatio - 2) < 0.02 ? 'ok' : 'bad', r.cjkRatio.toFixed(2)));
+    summary.appendChild(tr);
+  }
+  host.insertBefore(summary, host.firstChild);
+
+  document.getElementById('stamp').textContent = '量于 ' + new Date().toISOString();
+  const out = { generated_at: new Date().toISOString(), size_px: SIZE, stack: STACK,
+                chars: CHARS, cell_sample: N, results, missing };
+  document.getElementById('json').value = JSON.stringify(out, null, 2);
+  window.__FP_RESULT__ = out;      // 供 scripts/font_preview_check.js 取数
+  window.__FP_READY__ = true;
+}
+
+document.getElementById('copy').addEventListener('click', () => {
+  const ta = document.getElementById('json');
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+});
+
+build();
+</script>
+</body>
+</html>

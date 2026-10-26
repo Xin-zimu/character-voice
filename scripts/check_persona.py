@@ -190,7 +190,9 @@ def simulate_check_reply(reply: str, user_text: str, guard: dict) -> str:
     # 字符画本来就是多行，还常常要空行分隔文字，那不是「分段」这个违例（CHAT-017）。
     # 这条豁免必须跟前端 `checkReply()` 一致（DEC-006）——这里少写一次，
     # 自检报「分段」而界面不报，就会变成「两个检测器对同一句话结论不同」。
-    if re.search(r"\n\s*\n", reply) and not textart.is_art(reply):
+    # 判据是「有没有图案块」，不是「整条算不算图案」（2026-10-26）：
+    # 有图案块时，文字与图案之间那个空行是允许的；没有图案块的普通空行照旧要报。
+    if re.search(r"\n\s*\n", reply) and not textart.has_art_block(reply):
         probs.append("分段")
     return " ".join(probs[:2])
 

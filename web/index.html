@@ -121,7 +121,11 @@
   /* 多块排版：一个 .txt 里既有文字块又有图案块。折行与保空白是逐块的，
      不能挂在父节点上——父节点一保空白，文字行就跟着被压成一行。 */
   .line .txt.multi{white-space:normal}
-  .line .txt .blk{display:block;margin:0}
+  /* 文字块用 pre-wrap 而不是 normal（2026-10-26 实测）：normal 会把块内的换行
+     压掉，于是「文字 \n\n 图案」中间那个空行消失，图案紧贴上一句。
+     pre-wrap 既保留块内换行与空行，又照常折行——「文字被压成一行」那个旧 bug
+     是整条用 pre（不折行）造成的，不是 pre-wrap。 */
+  .line .txt .blk{display:block;margin:0;white-space:pre-wrap}
   .line .txt .blk.art{
     white-space:pre; overflow-x:auto; word-break:normal; letter-spacing:0;
     line-height:1.35;
@@ -905,6 +909,11 @@
   const ART_SENTENCE = /[，。！？；：、…,.!?;:]/;
   // 右边缘差多少格才算不齐（与 Python 的 _ART_EDGE_GAP 一致）。
   const ART_EDGE_GAP = 3;
+  // 「短图案行」的最大宽度（与 Python 的 _SHORT_ART_WIDTH 一致）。
+  const SHORT_ART_WIDTH = 16;
+  // 框线字符（与 Python 的 _FRAME_CHARS 一致）：出现在行首时各行必须上下对齐。
+  // 自由形状的缩进不参与左边距判定——那是画法，不是错误。
+  const FRAME_CHARS = new Set([...'│┃┌┏└┗├┣┤┫┬┳┴┻┼╋╭╮╰╯╔╗╚╝║╠╣╦╩╬']);
   // 组合字符（不占格）的近似范围。**必须是一个常量，两处共用**：
   // 原先 cellWidth 用 0300-036f + 1ab0-1aff + 20d0-20ff，而 checkArt 只查
   // 0300-036f——于是「带希伯来元音点的行」在排版上算 0 格，在「含组合字符」
@@ -931,13 +940,28 @@
     for(const ch of line) w += cellWidth(ch);
     return w;
   }
+  function artDensity(line){
+    // (图案字符数, 非空格字符数)。与 Python 的 `_density()` 逐条对应：
+    // 抽成一处是因为「收没收紧」和「算不算图案行」都要这两个数，
+    // 各算一遍迟早算出两个不同的值。
+    let symbols = 0, nonspace = 0;
+    for(const ch of line){
+      if(ch === " ") continue;
+      nonspace++;
+      const o = ch.codePointAt(0);
+      const mark = (o >= 0x0300 && o <= 0x036f) || (o >= 0x1ab0 && o <= 0x1aff) || (o >= 0x20d0 && o <= 0x20ff);
+      const emoji = (o >= 0x1F300 && o <= 0x1FAFF) || (o >= 0x2600 && o <= 0x27BF) || o === 0xFE0F || o === 0x200D;
+      if(!mark && !emoji && !/^[\p{L}\p{N}]$/u.test(ch) && cellWidth(ch) !== 2) symbols++;
+    }
+    return [symbols, nonspace];
+  }
   function artSignals(line){
     // (有没有连续 3 个符号/空格, 有没有两处以上双空格)
     // 什么算「符号」必须和 Python 的 `_signals` 一致：
     // 非字母数字、非宽字符、非组合字符。emoji **不算**——
     // Python 的 `str.isalnum()` 认为 emoji 是字母数字，那边就把它当内容；
     // 这里要是把它当符号，「🌙🌙」在两端会一个是画、一个不是。
-    let run = 0, max = 0, runSym = false, maxSym = false, symbols = 0;
+    let run = 0, max = 0, runSym = false, maxSym = false;
     for(const ch of line){
       const o = ch.codePointAt(0);
       const mark = (o >= 0x0300 && o <= 0x036f) || (o >= 0x1ab0 && o <= 0x1aff) || (o >= 0x20d0 && o <= 0x20ff);
@@ -947,15 +971,36 @@
       const emoji = (o >= 0x1F300 && o <= 0x1FAFF) || (o >= 0x2600 && o <= 0x27BF) || o === 0xFE0F || o === 0x200D;
       if(ch === " " || (!emoji && !mark && !/^[\p{L}\p{N}]$/u.test(ch) && cellWidth(ch) !== 2)){
         run++;
-        if(ch !== " ") { runSym = true; symbols++; }
+        if(ch !== " ") runSym = true;
         if(run > max){ max = run; maxSym = runSym; }
       }
       else { run = 0; runSym = false; }
     }
-    // 与 Python 的 `_signals` 一致：连续串里必须含**图案字符**，
-    // 光有空格不算（否则缩进两行的普通文字会被判成画）；
-    // 双空格那条也要至少有一个图案字符。
-    return [max >= 3 && maxSym, (line.match(/  /g) || []).length >= 2 && symbols >= 1];
+    // 与 Python 的 `_signals` 一致：
+    //   1. 连续串里必须含**图案字符**（光有空格不算，否则缩进两行的普通文字会被判成画）；
+    //   2. **符号要占多数**才算图案行（2026-10-26 修误判）。
+    //      原来只要求「至少 1 个图案字符」，于是缩进代码被整段当成画：
+    //      `    return x + 1` = 两处双空格 + 一个加号，条件正好成立。
+    //      Python 那边是 `symbols * 3 >= nonspace`，这里必须同一条口径。
+    const [symbols, nonspace] = artDensity(line);
+    const dense = nonspace > 0 && symbols * 3 >= nonspace;
+    return [max >= 3 && maxSym && dense, (line.match(/  /g) || []).length >= 2 && dense];
+  }
+  function artLineKind(line){
+    // 这一行在**分块**里算什么：'hard'（明确是图案行）/ 'soft'（可能是）/ ''。
+    // 与 Python 的 `_art_line_kind()` 逐条对应，理由也同一条（2026-10-26 复采）：
+    // 真实输出里的猫 `( o.o )` 那行顶格时，最长连续符号串只有 1，
+    // 于是整只猫一块都拼不出来，脸和嘴对不上耳朵。`soft` 把这种行补齐，
+    // 但**不能自己起块**（见 artBlocks 的 hasHard）。
+    if(!line.trim() || textWidth(line) > ART_MAX_WIDTH) return '';
+    const s = artSignals(line);
+    if(s[0] || s[1]) return 'hard';
+    // 框内写字的行（`│ ok │`）维持「宁可少判」的既有取舍，不升级成图案行。
+    if(FRAME_CHARS.has(line.replace(/^ +/, '').slice(0, 1))) return '';
+    const [symbols, nonspace] = artDensity(line);
+    const widthOk = textWidth(line) <= SHORT_ART_WIDTH;
+    if(widthOk && nonspace > 0 && symbols >= 2 && symbols * 3 >= nonspace) return 'soft';
+    return '';
   }
   function isArt(text){
     // 判据刻意窄：平时说话被误判成画，比漏判难看得多。
@@ -968,6 +1013,11 @@
     // 半个代理字符，`\\p{L}` 会对它报错、`codePointAt` 也不对。
     // 少了这个标志，「🌙🌙」在浏览器里会把整段判据抛异常——比判错更糟。
     return lines.some(l => { const s = artSignals(l); return s[0] || s[1]; });
+  }
+  function hasArtBlock(text){
+    // 「这条回复里有没有图案块」。分段豁免用它，比 isArt 更贴近规则：
+    // 规则允许的是**图案块**占多行、与文字之间留空行，不是「整条必须是图案」。
+    return artBlocks(text).some(([kind]) => kind);
   }
   function looksLikeArtPrefix(text){
     // 流式第一块就可能只到半行：只要眼下这几行里已经有图案迹象，就整块显示，
@@ -982,16 +1032,26 @@
     // 「图案」这个待遇（保留空白、不折行）只给图案那几行：实测汉字与 ASCII 的
     // 宽度比是 1.66 而不是 2，整条按图案排版时文字行会被压成一行，句号都被挤下去。
     const lines = String(text).split("\n");
-    const looks = l => !!l.trim() && textWidth(l) <= ART_MAX_WIDTH
-      && (() => { const s = artSignals(l); return s[0] || s[1]; })();
+    const kinds = lines.map(artLineKind);
     const blocks = [];
     let i = 0;
     while(i < lines.length){
-      if(!looks(lines[i])){ blocks.push([false, [lines[i]]]); i++; continue; }
+      if(!kinds[i]){ blocks.push([false, [lines[i]]]); i++; continue; }
       let j = i;
       // 连续两行以上像图案才算一块；单独一行（比如一整行 ====）仍当排版。
-      while(j + 1 < lines.length && looks(lines[j + 1])) j++;
-      if(j > i){ blocks.push([true, lines.slice(i, j + 1)]); i = j + 1; }
+      while(true){
+        while(j + 1 < lines.length && kinds[j + 1]) j++;
+        // **图案内部的空行不拆块**（与 Python 的 art_blocks 一致，2026-10-26）。
+        // 拆开后后半段变普通文字块，空白被折叠，下边框跳到左边与上边框错开。
+        // 只跨**后面紧跟着图案行**的空行；空行之后是普通文字，照旧断块。
+        let k = j;
+        while(k + 1 < lines.length && !lines[k + 1].trim()) k++;
+        if(k > j && k + 1 < lines.length && kinds[k + 1]){ j = k; continue; }
+        break;
+      }
+      // `soft` 不能单独成块：整段里没有 hard 行，就按普通文字处理。
+      const hasHard = kinds.slice(i, j + 1).includes('hard');
+      if(j > i && hasHard){ blocks.push([true, lines.slice(i, j + 1)]); i = j + 1; }
       else { blocks.push([false, [lines[i]]]); i++; }
     }
     const merged = [];
@@ -1020,22 +1080,38 @@
     const lines = String(text).split("\n");
     const body = lines.filter(l => l.trim());
     if(!body.length) return ["字符画里没有任何内容"];
-    const indents = [...new Set(body.map(l => l.match(/^ */)[0].length))].sort((a,b) => a-b);
+    // 左边距：**只查有框线的图案**（与 Python 一致，2026-10-26 修误报）。
+    // 自由形状的缩进本身就是形状的一部分（猫的第二行少一格是画法，不是错）。
+    // 真正能自动判的是框线：竖线必须上下对齐，歪了才是真歪。
+    const indents = [...new Set(body
+      .map(l => ({ind: l.match(/^ */)[0].length, rest: l.trim()[0] || ""}))
+      .filter(x => FRAME_CHARS.has(x.rest))
+      .map(x => x.ind))].sort((a,b) => a-b);
     if(indents.length > 1) probs.push(`字符画各行左边距不一致（${indents.join("/")}），图案会歪`);
     const trailing = lines.findIndex(l => l !== l.replace(/ +$/, ""));
     if(trailing >= 0) probs.push(`字符画第 ${trailing + 1} 行行尾有多余空格，某些字体会把后续行推歪`);
     // 右边距：左边缘齐了、右边缘差很多，说明行宽不一致，图案会「缺一块」。
     // 只在没有行尾空格时查（有行尾空格时上面那条更准确），与 Python 一致。
     if(trailing < 0){
-      // 只在图案块内比，不拿文字行当参照（与 Python 一致）。
+      // 只在**连续段**内比，不拿文字行当参照（与 Python 的 _art_runs 一致）。
+      // 一块里被空行分开的两段是两张画，跨段比会误报「缺一块」。
       for(const [kind, chunk] of artBlocks(text)){
         if(!kind) continue;
-        const rights = chunk.filter(l => l.trim()).map(textWidth);
-        if(rights.length < 2) continue;
-        const hi = Math.max(...rights), lo = Math.min(...rights);
-        if(hi - lo >= ART_EDGE_GAP){
-          probs.push(`字符画各行右边缘不齐（最宽 ${hi} 格、最窄 ${lo} 格），看着会缺一块`);
-          break;
+        let run = [];
+        const runs = [];
+        for(const ln of chunk){
+          if(ln.trim()) run.push(ln);
+          else if(run.length){ runs.push(run); run = []; }
+        }
+        if(run.length) runs.push(run);
+        for(const r of runs){
+          const rights = r.map(textWidth);
+          if(rights.length < 2) continue;
+          const hi = Math.max(...rights), lo = Math.min(...rights);
+          if(hi - lo >= ART_EDGE_GAP){
+            probs.push(`字符画各行右边缘不齐（最宽 ${hi} 格、最窄 ${lo} 格），看着会缺一块`);
+            break;
+          }
         }
       }
     }
@@ -1127,8 +1203,13 @@
     });
     // 分段（TERMINAL_PROMPT 第 1 条）。**例外**：字符画本来就是多行，
     // 还常常要空行分隔文字，那不是「分段」这个违例的意思（CHAT-017 / DEC-013）。
-    // 判据用 isArt 而不是「有没有空行」：有空行的话仍然是违例。
-    if(/\n\s*\n/.test(text) && !isArt(text)) probs.push("分段");
+    //
+    // 2026-10-26 修正：判据从「整条算不算图案」改成「有没有图案块」。
+    // 实测反例：四句文字 + 空行 + 一张小图，整条不算图案（文字行占多数），
+    // 于是那一个**用来引出图案的空行**被报成「分段」。规则说的是图案块
+    // 可以用空行，不是「只有整条都是图案时才允许空行」。
+    // 没有图案块的普通空行分段照旧要报（下面那条用例钉住）。
+    if(/\n\s*\n/.test(text) && !hasArtBlock(text)) probs.push("分段");
     // 字符画的对齐问题：错在**画**上，不是语气。排在最后，和括号规则一样，
     // 不挤掉最常见的语气提示。
     if(isArt(text)) for(const e of checkArt(text)) if(!probs.includes(e)) probs.push(e);

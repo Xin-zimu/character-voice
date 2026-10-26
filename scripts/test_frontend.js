@@ -300,6 +300,25 @@ print(json.dumps([p.build_messages(card,'normal',[],h,'本次提问') for h in d
     'a\u05b0\n---',
     'a\u0301\n---',
     'a\u20d0\n---',
+    // 2026-10-26：真实采样里出现过的形状，两端必须仍然一致。
+    // 自由形状（猫）的缩进不同不算歪；缩进代码不算画；
+    // 图案内部空行不拆块；框线歪了要报。
+    '   /\\_/\\\n  ( o.o )\n   > ^ <',
+    'def f(x):\n    return x + 1',
+    '    return x + 1\n    return y - 2',
+    '   ┌────┐\n   │    │\n\n   └────┘\n\n下面还有一句。',
+    '┌────┐\n  │    │\n└────┘',
+    '  说明一句。\n┌────┐\n└────┘',
+    '  ⣠⣾⣿⣦⡀\n  ⠙⠿⠿⠿⠋',
+    // 2026-10-26 复采查出的漏判：真实输出 A1 rep2 的猫，**脸那行顶格**。
+    // `( o.o )` 最长连续符号串只有 1，旧的「只认 hard 行」令整只猫一块都拼不出来，
+    // 界面按普通文字排版，行首空格被折叠，脸和嘴对不上耳朵。
+    // 这一例必须在比对样本里：M76 第一版没被拦住，就是因为缺它。
+    ' /\\_/\\\n( o.o )\n > ^ <',
+    // 收紧之后不能反过来：两行带符号的普通话（过 soft 门槛但没有 hard 行）
+    // 仍然不是图案块，表格行也照旧不升级。
+    'x=1;y=2\nk=3;j=4',
+    '┌────┐\n│ ok │\n└────┘',
   ];
   const art = spawnSync(PY, ['-c',
     `import json,sys; import textart as t
@@ -476,16 +495,50 @@ print(json.dumps([[t.is_art(x), t.check_art(x), t.text_width(x), t.art_blocks(x)
     ok(true, '图案模式的流式阶段同样按块渲染（不等到收尾才重排）');
   }
 
-  // 图案被标 △ 的是**画**的问题，不是语气。左边距不一致要说出来。
+  // 图案被标 △ 的是**画**的问题，不是语气。**框线歪了**要说出来。
+  //
+  // 2026-10-26 显式重写：旧样例是 `  ⣠⣾` / ` ⠿⠿`（两行盲文点阵），
+  // 断言的是「缩进不同 ⇒ 违例」。实测证明那是误报——盲文点阵第二行少一格
+  // 是画法；24 次真实采样里 9 条正确的图案都被这条判据标歪。
+  // 现在左边距只对**框线**判：竖线上下不齐才是真歪。
+  // 自由形状的对齐问题没有可靠的自动判据，交给人工看（V-ART-02 的 D 类）。
   {
     T.setState(cards[1], []);
-    const bad = '  ⣠⣾\n ⠿⠿';
+    const bad = '┌────────┐\n  │        │\n└────────┘';
     assert(T.isArt(bad), '坏样例本身要算图案，否则这条测试测的是别的');
-    assert(T.checkReply(bad).includes('左边距'), '图案歪了要提示，而不是安静通过');
+    assert(T.checkReply(bad).includes('左边距'), '框线歪了要提示，而不是安静通过');
+    const freeform = '  ⣠⣾\n ⠿⠿';
+    assert(T.isArt(freeform), '自由形状本身仍要算图案');
+    assert(!T.checkReply(freeform).includes('左边距'), '画对的自由形状不该被标歪');
     T.setState(cards[0], []);
     assert.equal(T.checkReply('第一句。\n\n第二句。'), '分段',
       '同一个检查不能让普通分段漏掉');
     ok(true, '图案对齐问题走 △，普通分段仍按「分段」报');
+  }
+
+  // 文字 + 空行 + 图案**不是**「分段」（2026-10-26 实测的误报）。
+  // 规则允许的是图案块与文字之间留空行，不是「只有整条都是图案时才允许空行」。
+  // 原来用 isArt 判整条，于是四句文字 + 空行 + 一张小图被报分段。
+  {
+    T.setState(cards[1], []);
+    const mixed = '第一句话。\n第二句话。\n第三句话。\n\n┌────┐\n└────┘';
+    assert(!T.isArt(mixed), '整条不算图案——所以 isArt 这条判据不适用');
+    assert(!T.checkReply(mixed).includes('分段'), '有图案块时，那个空行不该算分段');
+    assert.equal(T.checkReply('看书。\n\n另外，温度在下降。'), '分段',
+      '没有图案块的普通空行仍然要报，不能被上面那条豁免掉');
+    ok(true, '文字 + 空行 + 图案不算分段；普通分段照旧报');
+  }
+
+  // 文字块必须保留自己的换行（2026-10-26 实测）：`white-space:normal` 会把
+  // 「文字 \n\n 图案」中间的空行压掉，图案紧贴上一句。
+  // pre-wrap 既留空行又照常折行——「文字被压成一行」是整条用 pre 造成的。
+  {
+    const css = HTML.match(/<style>([\s\S]*?)<\/style>/)[1];
+    const m = css.match(/\.line \.txt \.blk\{([^}]*)\}/);
+    assert(m, '找不到 .line .txt .blk 的样式');
+    assert(/white-space:\s*pre-wrap/.test(m[1]),
+      `.blk 必须 white-space:pre-wrap（保住块内空行、同时仍折行），实际是「${m[1]}」`);
+    ok(true, '文字块 pre-wrap：块内空行保留且仍可折行');
   }
 
   // Network read rejection is a separate path from clean EOF or SSE errors.

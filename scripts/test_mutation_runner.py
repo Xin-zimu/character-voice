@@ -12,6 +12,40 @@ import mutation_check as mutation
 
 
 class IsolationTests(unittest.TestCase):
+    def test_crash_is_not_assertion_evidence(self):
+        self.assertIsNone(mutation.failure_evidence('backend',
+            'Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.'))
+        self.assertIsNone(mutation.failure_evidence('backend',
+            'Traceback (most recent call last):\nTypeError: null card'))
+        self.assertIsNone(mutation.failure_evidence('frontend',
+            'FAIL: node unavailable\n[harness] 用例没跑完'))
+        for kind, output in (
+            ('backend', 'FAIL: test_history\nAssertionError: wrong history\nFAILED (failures=1)'),
+            ('frontend', 'FAIL: alignment\nAssertionError [ERR_ASSERTION]: alignment'),
+            ('selfcheck', '  ✗ 示例 括号不配对\n合计错误 1 条'),
+            ('sources', '  × 标签不符\n1 条对不上。'),
+        ):
+            with self.subTest(kind=kind):
+                self.assertIsNotNone(mutation.failure_evidence(kind, output))
+
+    def test_valid_mutation_followed_by_runtime_crash_is_unverified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'personas').mkdir()
+            for name in ('yuki.json', 'yuki_school.json'):
+                (root / 'personas' / name).write_text('{"system_prompt":"x","examples":[]}', encoding='utf-8')
+            outputs = iter([(True, 'baseline'), (False, 'Fatal Python error: Executing a cache.')])
+            output = io.StringIO()
+            with patch.object(mutation, 'ROOT', root), \
+                 patch.object(mutation, 'PERSONAS', root / 'personas'), \
+                 patch.object(mutation, 'MUTATIONS', [('BAD', 'crash', 'yuki.json', lambda card: dict(card, system_prompt='changed'), 'backend')]), \
+                 patch.dict(mutation.RUNNERS, {'backend': (lambda: next(outputs), 'fake')}), \
+                 contextlib.redirect_stdout(output):
+                self.assertNotEqual(mutation.run_mutations(), 0)
+            self.assertIn('未确证', output.getvalue())
+            # 区分成功行与「不能算已拦住」的诊断说明。
+            self.assertNotIn('✓ BAD 已拦住', output.getvalue())
+
     def test_bracket_mutation_preserves_card_and_adds_broken_example(self):
         card = json.loads((mutation.PERSONAS / 'yuki.json').read_text(encoding='utf-8'))
         changed = mutation.m_broken_bracket_example(copy.deepcopy(card))

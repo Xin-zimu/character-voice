@@ -14,8 +14,8 @@
 正常退出或 Ctrl+C 清理副本；强杀进程可能留下临时目录，但不会改坏源文件。
 每项完整测试输出保存在 out/mutation-<时间戳>/，不只保留第一条失败信息。
 
-判据：每个变异都必须让 `scripts/test_backend.py` 失败。若某个变异仍然全绿，
-说明对应的规则没有真正被测试保护，脚本以非 0 退出并在最后列出漏网的编号。
+判据：每个变异必须让其指定的检查出现断言失败。仍然全绿记为未拦住；
+变异产物损坏记为失效；运行时崩溃或无断言证据记为未确证，均以非 0 退出。
 
 注意：这不是「测试通过」的证据，而是「测试会失败」的证据。两者都要有。
 """
@@ -90,6 +90,32 @@ def copy_snapshot(source, target):
 def save_output(name, output):
     if REPORT_DIR is not None:
         (REPORT_DIR / f'{name}.log').write_text(output, encoding='utf-8')
+
+
+def failure_evidence(kind, output):
+    """非零退出只是必要条件；运行时崩溃／未完成测试不证明断言拦住了变异。"""
+    if 'Fatal Python error:' in output:
+        return None
+    if kind in {'backend', 'scene', 'textart'}:
+        if not re.search(r'^FAILED \(', output, re.M):
+            return None
+        pattern = r'^FAIL: .+'
+    elif kind == 'frontend':
+        if 'AssertionError' not in output:
+            return None
+        pattern = r'^FAIL: .+'
+    elif kind == 'selfcheck':
+        if not re.search(r'合计错误 [1-9]\d* 条', output):
+            return None
+        pattern = r'^\s*✗ .+'
+    elif kind == 'sources':
+        if not re.search(r'[1-9]\d* 条对不上', output):
+            return None
+        pattern = r'^\s*× .+'
+    else:
+        return None
+    match = re.search(pattern, output, re.M)
+    return match.group().strip() if match else None
 
 
 def path_of(name):
@@ -484,14 +510,14 @@ def m_art_kind_reversed(src):
 
 def m_art_no_blocks(src):
     """分块退回到「整条一个块」——文字行会被压成一行、句号被挤下去。"""
-    marker = '    blocks = []\n    i = 0\n    n = len(lines)'
+    marker = '    blocks = []\n    i = 0\n    while i < n:'
     assert marker in src, '变异失效：找不到 art_blocks 的主循环'
     return src.replace(marker, '    return [(False, lines)]\n' + marker, 1)
 
 
 def m_art_block_single_line(src):
     """单行像图案也起块 —— 一整行 ==== 会换一套排版。"""
-    marker = '        if j > i:\n            blocks.append([True, lines[i:j + 1]])'
+    marker = '        if j > i and has_hard:\n            blocks.append([True, lines[i:j + 1]])'
     assert marker in src, '变异失效：找不到起块判定'
     return src.replace(marker, '        if True:\n            blocks.append([True, lines[i:j + 1]])', 1)
 
@@ -518,14 +544,14 @@ def m_art_selfcheck_no_art_exemption(src):
     """
     # 用原始字符串写锚点：源码里的字面量就是 r"\n\s*\n"，
     # 写成普通字符串要多套一层转义，很容易写成匹配不上的样子。
-    marker = r'    if re.search(r"\n\s*\n", reply) and not textart.is_art(reply):'
+    marker = r'    if re.search(r"\n\s*\n", reply) and not textart.has_art_block(reply):'
     assert marker in src, '变异失效：找不到 simulate_check_reply 的分段判定'
     return src.replace(marker, r'    if re.search(r"\n\s*\n", reply):', 1)
 
 
 def m_art_space_counts_as_symbol(src):
     """空格又被算进「符号」——缩进两行的普通文字会被判成画。"""
-    marker = r'    return (longest_run >= _ART_RUN and longest_has_symbol,'
+    marker = r'    return (longest_run >= _ART_RUN and longest_has_symbol and dense,'
     assert marker in src, '变异失效：找不到 _signals 的返回语句'
     # 去掉「连续串必须含图案字符」这个条件，效果等于回到「空格也算符号」。
     return src.replace(marker, r'    return (longest_run >= _ART_RUN,', 1)
@@ -533,7 +559,7 @@ def m_art_space_counts_as_symbol(src):
 
 def m_art_frontend_space_counts_as_symbol(src):
     """前端那一侧同样把空格算成符号 —— 两端判据漂移。"""
-    marker = '    return [max >= 3 && maxSym, (line.match(/  /g) || []).length >= 2 && symbols >= 1];'
+    marker = '    return [max >= 3 && maxSym && dense, (line.match(/  /g) || []).length >= 2 && dense];'
     assert marker in src, '变异失效：找不到 artSignals 的返回语句'
     return src.replace(marker, '    return [max >= 3, (line.match(/  /g) || []).length >= 2];', 1)
 
@@ -760,6 +786,126 @@ def m_restore_skip_praise_example(card):
     return card
 
 
+def m_art_density_dropped(src):
+    """符号密度条件被删掉 —— 缩进代码又被当成字符画（2026-10-26 的误判）。"""
+    marker = "    dense = bool(nonspace) and symbols * 3 >= nonspace"
+    assert marker in src, '变异失效：找不到符号密度判定'
+    return src.replace(marker, "    dense = True", 1)
+
+
+def m_art_frontend_density_dropped(src):
+    """前端删掉密度条件 —— 两端对「缩进代码是不是画」分叉。"""
+    marker = "    const dense = nonspace > 0 && symbols * 3 >= nonspace;"
+    assert marker in src, '变异失效：前端找不到密度判定'
+    return src.replace(marker, "    const dense = true;", 1)
+
+
+def m_art_blank_line_splits_again(src):
+    """图案内部空行又拆块 —— 下边框重新跳到左边（2026-10-26 修掉的显示 bug）。"""
+    marker = "            if k > j and k + 1 < n and kinds[k + 1]:"
+    assert marker in src, '变异失效：找不到空行跨块的判定'
+    return src.replace(marker, "            if False and k > j and k + 1 < n and kinds[k + 1]:", 1)
+
+
+def m_art_frontend_blank_line_splits_again(src):
+    """前端图案内部空行又拆块 —— 与 Python 分叉，下边框错位。"""
+    marker = "        if(k > j && k + 1 < lines.length && kinds[k + 1]){ j = k; continue; }"
+    assert marker in src, '变异失效：前端找不到空行跨块的判定'
+    return src.replace(marker, "        if(false){ j = k; continue; }", 1)
+
+
+def m_art_freeform_indent_reported_again(src):
+    """左边距退回「所有行都要一样」—— 自由形状又全被标歪（旧的误报）。"""
+    marker = "        if len(ln) > n and ln[n] in _FRAME_CHARS:"
+    assert marker in src, '变异失效：找不到框线字符判定'
+    return src.replace(marker, "        if len(ln) > n:", 1)
+
+
+def m_art_frontend_freeform_indent_reported_again(src):
+    """前端左边距退回「所有行都要一样」—— 两端一起误报。"""
+    marker = "      .filter(x => FRAME_CHARS.has(x.rest))"
+    assert marker in src, '变异失效：前端找不到框线字符判定'
+    return src.replace(marker, "      .filter(() => true)", 1)
+
+
+def m_art_segment_needs_whole_art(src):
+    """分段豁免退回「整条都得是图案」—— 文字 + 空行 + 小图又被报分段。"""
+    marker = "if(/\\n\\s*\\n/.test(text) && !hasArtBlock(text)) probs.push(\"分段\");"
+    assert marker in src, '变异失效：前端找不到分段判定'
+    return src.replace(marker, "if(/\\n\\s*\\n/.test(text) && !isArt(text)) probs.push(\"分段\");", 1)
+
+
+def m_art_segment_needs_whole_art_py(src):
+    """自检那边同样退回整条判定 —— 两端对同一条回复给出不同的违例。"""
+    marker = r'    if re.search(r"\n\s*\n", reply) and not textart.has_art_block(reply):'
+    assert marker in src, '变异失效：找不到自检的分段判定'
+    return src.replace(marker, r'    if re.search(r"\n\s*\n", reply) and not textart.is_art(reply):', 1)
+
+
+def m_art_frontend_text_block_collapses(src):
+    """文字块退回 white-space:normal —— 文字与图案之间的空行被折叠（2026-10-26）。"""
+    marker = "  .line .txt .blk{display:block;margin:0;white-space:pre-wrap}"
+    assert marker in src, '变异失效：找不到文字块的样式'
+    return src.replace(marker, "  .line .txt .blk{display:block;margin:0}", 1)
+
+
+def m_art_face_line_requires_long_run(src):
+    """`_art_line_kind` 退回「只认 hard」—— 顶格的脸又把整只猫拆散（2026-10-26 复采）。
+
+    这一条锁的是软判据本身：把 `soft` 分支删掉，`test_49` 的顶格猫必须红。
+    不能只删 `soft` 的「至少 2 个图案字符」半句——那样 `( o.o )` 依然能进，
+    变异就是空操作。
+    """
+    marker = '    if (text_width(line) <= _SHORT_ART_WIDTH and nonspace\n' \
+             '            and symbols >= 2 and symbols * 3 >= nonspace):\n' \
+             '        return "soft"\n'
+    assert marker in src, '变异失效：找不到 soft 行的判据'
+    return src.replace(marker, '    return ""\n', 1)
+
+
+def m_art_frontend_face_line_requires_long_run(src):
+    """前端同样退回只认 hard —— 两端对「顶格的脸算不算图案」分叉。"""
+    marker = "    if(widthOk && nonspace > 0 && symbols >= 2 && symbols * 3 >= nonspace) return 'soft';"
+    assert marker in src, '变异失效：前端找不到 soft 行的判据'
+    return src.replace(marker, "    return '';", 1)
+
+
+def m_art_soft_lines_can_start_block(src):
+    """`soft` 行可以自己起块 —— 两行普通话被换成保空白排版（收紧过头的反向）。
+
+    这一条锁「soft 不能独自成块」：把 `has_hard` 去掉，`test_50`
+    里那两行「带点符号的日常话」必须变成图案块。
+    """
+    marker = "        has_hard = any(kinds[x] == \"hard\" for x in range(i, j + 1))"
+    assert marker in src, '变异失效：找不到 soft 必须有 hard 的判定'
+    return src.replace(marker, "        has_hard = True", 1)
+
+
+def m_art_soft_swallows_table_rows(src):
+    """`soft` 不再排除框线开头的行 —— 表格行被卷进图案块（PEND-011 的取舍被改掉）。"""
+    marker = '    if left[:1] in _FRAME_CHARS:'
+    assert marker in src, '变异失效：找不到框线开头的排除条件'
+    return src.replace(marker, '    if False:', 1)
+
+
+def m_corpus_load_without_lock(src):
+    """`load_corpus()` 退回无锁的「先查后建」—— 并发时构造多份索引。
+
+    这是 2026-10-26 查出来的一次真实崩溃的根因：全量变异连跑两遍各崩一次，
+    崩的位置还是随机的。去掉锁之后，`test_03b` 会看到 6 个线程构造 6 份。
+    """
+    marker = ('    if CORPUS is not None:          # 快路径：已加载时不进锁\n'
+              '        return CORPUS\n'
+              '    with _CORPUS_LOCK:\n'
+              '        if CORPUS is None:          # 双重检查：等锁期间可能已被别人建好\n'
+              '            CORPUS = Corpus(INDEX)\n'
+              '        return CORPUS')
+    assert marker in src, '变异失效：找不到 load_corpus 的加锁实现'
+    return src.replace(marker, '    if CORPUS is None:\n        CORPUS = Corpus(INDEX)\n'
+                               '    return CORPUS', 1)
+
+
+
 MUTATIONS = [
     ('M1', '用户只表达情绪，回答却给方案（旧「好慌→看三章」）',
      'yuki.json', m_add_advice_without_ask, 'backend'),
@@ -885,6 +1031,37 @@ MUTATIONS = [
      m_drop_self_history_rule, 'backend'),
     ('M65', 'CHAT-019 反向：删掉「检索没讲到就等于没有依据」', 'prompt_builder.py',
      m_drop_hits_are_not_evidence, 'backend'),
+    ('M66', '2026-10-26 反向：删掉符号密度，缩进代码又被当成字符画', 'textart.py',
+     m_art_density_dropped, 'textart'),
+    ('M67', '2026-10-26 反向：前端删掉符号密度，两端对代码分叉', 'web/index.html',
+     m_art_frontend_density_dropped, 'frontend'),
+    ('M68', '2026-10-26 反向：图案内部空行又拆块，下边框错位', 'textart.py',
+     m_art_blank_line_splits_again, 'textart'),
+    ('M69', '2026-10-26 反向：前端图案内部空行又拆块', 'web/index.html',
+     m_art_frontend_blank_line_splits_again, 'frontend'),
+    ('M70', '2026-10-26 反向：左边距退回全行比较，自由形状又误报', 'textart.py',
+     m_art_freeform_indent_reported_again, 'textart'),
+    ('M71', '2026-10-26 反向：前端左边距退回全行比较', 'web/index.html',
+     m_art_frontend_freeform_indent_reported_again, 'frontend'),
+    ('M72', '2026-10-26 反向：分段豁免退回「整条都得是图案」（前端）', 'web/index.html',
+     m_art_segment_needs_whole_art, 'frontend'),
+    ('M73', '2026-10-26 反向：自检的分段豁免退回整条判定', 'scripts/check_persona.py',
+     m_art_segment_needs_whole_art_py, 'textart'),
+    ('M74', '2026-10-26 反向：文字块退回 normal，块间空行被折叠', 'web/index.html',
+     m_art_frontend_text_block_collapses, 'frontend'),
+    # 2026-10-26 复采查出的漏判：「顶格的脸」让整只猫拼不成块（A1 rep2 原样输出）。
+    # 四条一起锁：软判据在不在、前端的镜像、soft 不能自己起块、表格行的取舍没被顺手改掉。
+    ('M75', '2026-10-26 反向：删掉 soft 行判据，顶格的脸又把整只猫拆散', 'textart.py',
+     m_art_face_line_requires_long_run, 'textart'),
+    ('M76', '2026-10-26 反向：前端删掉 soft 行判据，两端对顶格的猫分叉', 'web/index.html',
+     m_art_frontend_face_line_requires_long_run, 'frontend'),
+    ('M77', '2026-10-26 反向：soft 行可以自己起块，两行普通话被压成图案', 'textart.py',
+     m_art_soft_lines_can_start_block, 'textart'),
+    ('M78', '2026-10-26 反向：soft 不再排除框线行，表格行被卷进图案块', 'textart.py',
+     m_art_soft_swallows_table_rows, 'textart'),
+    # 2026-10-26 查实的一次解释器崩溃，根因是索引惰性加载的竞态。
+    ('M79', '2026-10-26 反向：load_corpus 退回无锁，并发构造多份索引', 'server.py',
+     m_corpus_load_without_lock, 'backend'),
 ]
 
 
@@ -1009,7 +1186,7 @@ def run_mutations():
         (backup / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, backup / name)
 
-    passed, leaks, broken = 0, [], []
+    passed, leaks, broken, unverified = 0, [], [], []
     try:
         for kind in dict.fromkeys(m[4] for m in MUTATIONS):
             runner, where = RUNNERS[kind]
@@ -1068,17 +1245,13 @@ def run_mutations():
                 leaks.append((mid, desc))
                 print(f'  ✗ {mid} 未拦住：{desc}（期望 {where} 变红，实际全绿）')
             else:
-                # 报错行有两种格式：unittest 的 `FAIL: test_xx (...)` / `ERROR: ...`，
-                # 以及自写脚本的 `  × 说明`。只认前一种的话，`verify_sources.py`
-                # 拦住了也会打印「未捕获到用例名」——看着像没查清楚，
-                # 实际是报告写得不对，这种含糊会让人以为变异没验过。
-                first = next((ln.strip() for ln in out.splitlines()
-                              if 'FAIL:' in ln or 'ERROR:' in ln or 'AssertionError' in ln), '')
-                if not first:
-                    first = next((ln.strip() for ln in out.splitlines()
-                                  if ln.lstrip().startswith(('×', '✗', '✘'))), '(未捕获到报错行，请查完整日志)')
-                print(f'  ✓ {mid} 已拦住：{desc}\n      → {first.strip()}')
-                passed += 1
+                first = failure_evidence(expect, out)
+                if first is None:
+                    unverified.append((mid, desc))
+                    print(f'  ! {mid} 未确证：异常退出或没有断言失败证据；请查完整日志')
+                else:
+                    print(f'  ✓ {mid} 已拦住：{desc}\n      → {first}')
+                    passed += 1
     finally:
         for name, raw in originals.items():
             path_of(name).write_bytes(raw)
@@ -1093,6 +1266,11 @@ def run_mutations():
         print('以下变异没有被任何断言发现（说明对应规则没有真正的测试保护）：')
         for mid, desc in leaks:
             print(f'  - {mid} {desc}')
+    if unverified:
+        print('以下变异的测试未提供有效断言证据，不能算已拦住：')
+        for mid, desc in unverified:
+            print(f'  - {mid} {desc}')
+        return 2
     if broken or leaks:
         return 1
     print('所有变异都会让回归变红：规则确实被测试锁住。')

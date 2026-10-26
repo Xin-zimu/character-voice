@@ -35,6 +35,7 @@ import os
 import socket
 import socketserver
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -132,11 +133,37 @@ def scene_turn(user_text: str, world: str, commit: bool = True) -> tuple[str, di
         return "", {}
 
 
+_CORPUS_LOCK = threading.Lock()
+
+
 def load_corpus() -> Corpus:
+    """惰性加载检索索引，**加锁**。
+
+    为什么必须加锁（2026-10-26 复现）：
+    原来这里是「先查后建」——
+
+        if CORPUS is None:
+            CORPUS = Corpus(INDEX)
+
+    `ThreadingTCPServer` 每个请求一个线程，窗口里进来的线程都会看到
+    `CORPUS is None`，于是**同时构造多份 13070 条的索引**。
+    实测 6 个线程同时进来，构造了 **6 次**、拿到 6 个互不相同的对象。
+
+    后果不只是浪费内存：多份索引在多个线程里同时构建，
+    本机 CPython 3.13.2 上会偶发解释器级崩溃
+    （`Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache`，
+    或直接 0xC0000005）。全量变异测试连跑两遍，各崩一次、崩的位置还不同
+    ——查下去的根因就是这个竞态，不是变异脚本的问题。
+
+    加锁之后：只有第一个线程构造，其余等待并复用同一个对象。
+    """
     global CORPUS
-    if CORPUS is None:
-        CORPUS = Corpus(INDEX)
-    return CORPUS
+    if CORPUS is not None:          # 快路径：已加载时不进锁
+        return CORPUS
+    with _CORPUS_LOCK:
+        if CORPUS is None:          # 双重检查：等锁期间可能已被别人建好
+            CORPUS = Corpus(INDEX)
+        return CORPUS
 
 
 def load_personas() -> dict:

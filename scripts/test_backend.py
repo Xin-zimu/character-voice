@@ -4,6 +4,7 @@ import json
 import re
 import socket
 import sys
+import time
 import tempfile
 import threading
 import unittest
@@ -200,6 +201,60 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(self.corpus.episodes), 29)
         self.assertEqual(sum(d['world'] == 'crash' for d in self.corpus.docs), 1574)
         self.assertEqual(len({d['id'] for d in self.corpus.docs}), 13070)
+
+    def test_03b_corpus_load_is_locked(self):
+        """`load_corpus()` 必须只构造**一份**索引（2026-10-26 复现的竞态）。
+
+        原来是「先查后建」：
+
+            if CORPUS is None:
+                CORPUS = Corpus(INDEX)
+
+        `ThreadingTCPServer` 每个请求一个线程，窗口里进来的线程都会看到
+        `CORPUS is None`，于是同时构造多份 13070 条索引。实测 6 个线程
+        同时进来**构造了 6 次**、拿到 6 个互不相同的对象。
+
+        后果不只是浪费内存：多份索引在多个线程里同时构建，本机 CPython
+        3.13.2 上会偶发解释器级崩溃（`Fatal Python error:
+        _PyEval_EvalFrameDefault: Executing a cache` 或 0xC0000005）。
+        全量变异测试连跑两遍各崩一次、崩的位置还是随机的——根因就是这个竞态。
+
+        这里不真建索引（太慢），而是换成立即返回的假构造器，只数次数。
+        """
+        import threading as _threading
+
+        real_corpus = server.Corpus
+        real_global = server.CORPUS
+        calls = []
+        gate = _threading.Barrier(6)
+
+        class _SlowCorpus:
+            def __init__(self, index_dir):
+                calls.append(index_dir)
+                # **必须真的慢下来**：真实索引构造要几秒，竞态窗口就有那么大。
+                # 第一版写成立即返回的假构造器，结果**无锁也能过**——
+                # 六个线程还没来得及相遇，第一个就已经把 CORPUS 填好了，
+                # 于是用例测不到它声称要测的东西（M79 就是这么漏掉的）。
+                time.sleep(0.2)
+
+        try:
+            server.Corpus = _SlowCorpus
+            server.CORPUS = None
+
+            def worker():
+                gate.wait()         # 尽量让所有线程同时进 load_corpus
+                server.load_corpus()
+
+            threads = [_threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(calls), 1,
+                             f'并发调用构造了 {len(calls)} 份索引，应当是 1 份')
+        finally:
+            server.Corpus = real_corpus
+            server.CORPUS = real_global
 
     def test_04_retrieval_anchors(self):
         self._need_corpus()
