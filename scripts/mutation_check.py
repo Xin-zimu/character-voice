@@ -96,7 +96,7 @@ def failure_evidence(kind, output):
     """非零退出只是必要条件；运行时崩溃／未完成测试不证明断言拦住了变异。"""
     if 'Fatal Python error:' in output:
         return None
-    if kind in {'backend', 'scene', 'textart'}:
+    if kind in {'backend', 'scene', 'textart', 'artbehavior'}:
         if not re.search(r'^FAILED \(', output, re.M):
             return None
         pattern = r'^FAIL: .+'
@@ -906,6 +906,60 @@ def m_corpus_load_without_lock(src):
 
 
 
+def m_inline_visual_removed(src):
+    """行内视觉元素判据被删掉 —— 数不到「一行嵌在正文里的方块走势图」。
+
+    这是 2026-10-26 第三轮真实发生过的漏数：E5-info-2 turn3 回了
+    `▁▂▄▆█▆▂▁▃▅█` 接在正文里，`art_blocks()` 判不出来。
+    把阈值抬到 99 就等于「永远不认」，`test_01_inline_chart_is_counted` 会红。
+    """
+    marker = '"inline_visual": inline_run >= 5 and not blocks,'
+    assert marker in src, '变异失效：找不到 inline_visual 的判据'
+    return src.replace(marker, '"inline_visual": inline_run >= 99 and not blocks,', 1)
+
+
+def m_inline_counts_pure_rule(src):
+    """纯框线的连续段也算行内 —— 表格边框被当成「她在用图形表达」。
+
+    这是新判据第一版的真实误报：`┌────┐` 是一行连续 6 个框线字符，
+    只看长度完全够门槛。去掉 `_is_pure_rule` 的排除之后，
+    `test_02_table_row_is_neither` / `test_05b` 会红。
+    """
+    marker = '                if cur > best and not _is_pure_rule(run_text):'
+    assert marker in src, '变异失效：找不到纯框线的排除条件'
+    return src.replace(marker, '                if cur > best:', 1)
+
+
+def m_e6_plain_arm_keeps_art(src):
+    """「没画过」那一臂忘了删图案块 —— 两臂的自变量不再是「画没画」。
+
+    E6 的全部意义在两臂只差一张图。如果 `strip_art_block()` 直接返回原文，
+    两臂的 seed 就一模一样，`test_10` / `test_11` 会红。
+    """
+    marker = ('    kept = []\n'
+              '    for kind, chunk in textart.art_blocks(reply):\n'
+              '        if kind:\n'
+              '            continue\n'
+              '        kept.extend(chunk)')
+    assert marker in src, '变异失效：找不到 strip_art_block 的删块循环'
+    return src.replace(marker, '    return reply\n' + marker, 1)
+
+
+def m_recount_trusts_stale_stats(src):
+    """重算沿用存档里的旧统计字段 —— 换了判据也不会重判。
+
+    2026-10-26 第三轮的真实情形：66 条采样跑完时 `stats.json` 还没有
+    `inline_visual`（判据是事后补的）。若重算不按 `reply` 重判，
+    存档里的数字会永远停在旧判据上，而「原始回复」这个证据就白存了。
+    `test_13` 会红。
+    """
+    marker = ('    for r in rows:\n'
+              '        # 原始回复是唯一真源：统计字段全部按当前判据重算，不信任存档里的旧值。\n'
+              '        r.update(analyse(r.get("reply") or ""))')
+    assert marker in src, '变异失效：找不到 recount 的重判循环'
+    return src.replace(marker, '    for r in rows:\n        pass', 1)
+
+
 MUTATIONS = [
     ('M1', '用户只表达情绪，回答却给方案（旧「好慌→看三章」）',
      'yuki.json', m_add_advice_without_ask, 'backend'),
@@ -1062,6 +1116,15 @@ MUTATIONS = [
     # 2026-10-26 查实的一次解释器崩溃，根因是索引惰性加载的竞态。
     ('M79', '2026-10-26 反向：load_corpus 退回无锁，并发构造多份索引', 'server.py',
      m_corpus_load_without_lock, 'backend'),
+    # 2026-10-26 第三轮：采样统计口径（与显示层的 textart 分开，见 run_artbehavior）。
+    ('M80', '2026-10-26 反向：删掉行内视觉元素判据，数不到嵌在正文里的走势图',
+     'scripts/art_behavior_probe.py', m_inline_visual_removed, 'artbehavior'),
+    ('M81', '2026-10-26 反向：纯框线也算行内视觉，表格边框被当成图',
+     'scripts/art_behavior_probe.py', m_inline_counts_pure_rule, 'artbehavior'),
+    ('M82', '2026-10-26 反向：E6 的「没画过」臂忘了删图案，两臂不再只差一张图',
+     'scripts/art_behavior_probe.py', m_e6_plain_arm_keeps_art, 'artbehavior'),
+    ('M83', '2026-10-26 反向：重算沿用存档旧统计，换判据也不重判',
+     'scripts/art_behavior_probe.py', m_recount_trusts_stale_stats, 'artbehavior'),
 ]
 
 
@@ -1146,11 +1209,27 @@ def run_sources():
 
 
 #: 期望项 → (执行器, 打印用的文件名)
+def run_artbehavior():
+    """采样工具自己的判据回归（行内视觉元素 / E6 两臂的控制变量）。
+
+    为什么不并进 textart：`textart.py` 是显示层判据，`art_behavior_probe.py`
+    是**采样时的统计口径**，两者的取舍方向不同——显示层宁可少判，
+    统计层宁可多记一个字段（因为数漏了会把 1 次读成 0 次，前三轮已经发生过三次）。
+    混在一起会让「加宽判据」的压力传导到显示层。
+    """
+    proc = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'test_art_behavior.py')],
+                          cwd=ROOT, env=test_env(), stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          text=True, encoding='utf-8', errors='replace')
+    return proc.returncode == 0, (proc.stdout or '')
+
+
 RUNNERS = {
     'backend': (run_backend, 'test_backend.py'),
     'selfcheck': (run_check_persona, 'check_persona.py'),
     'scene': (run_scene, 'test_scene.py'),
     'textart': (run_textart, 'test_textart.py'),
+    'artbehavior': (run_artbehavior, 'test_art_behavior.py'),
     'frontend': (run_frontend, 'test_frontend.js'),
     'sources': (run_sources, 'verify_sources.py'),
 }

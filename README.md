@@ -175,12 +175,15 @@ node scripts/test_frontend.js
 py scripts/test_backend.py
 py scripts/test_scene.py
 py scripts/test_textart.py
+py scripts/test_art_behavior.py    # 采样统计口径：图案块 / 行内视觉元素 / E6 两臂控制
 py scripts/verify_sources.py
 ```
 
-当前基线（2026-10-26）：语料 13070 条，自检 0 错误，前端 69 项、后端 68 项（1 跳过）、场景 33 项、字符画 51 项通过，来源核对 1/1。隔离副本**全量变异 79/79 均有断言失败证据、无「未确证」项**（M66～M79 为 2026-10-26 新增），执行器 7 项与采样工具 2 项通过；历史结果与局限见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+当前基线（2026-10-26）：语料 13070 条，自检 0 错误，前端 69 项、后端 68 项（1 跳过）、场景 33 项、字符画 51 项、**采样口径 12 项**通过，来源核对 1/1。变异：M1～M79 在 2026-10-26 第二轮跑过**全量 79/79 有断言失败证据、无「未确证」项**；第三轮新增 **M80～M83 定向 4/4 报红**，**未重跑全量 83 项**——引用全量结果时要把这个限制带上。执行器 7 项与采样工具 2 项通过；历史结果与局限见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 真实试聊用 `scripts/live_chat.py`（走可选后端或自己的 Key），记录写到 `out/live-chat-<时间戳>.md`。
+自主出图／场景依赖／画后连续性用 `scripts/art_behavior_probe.py`（E4／E5／E6），
+局部排版量测用 `scripts/art_cell_probe.js`。
 
 变异验证默认在临时副本运行，复制当前工作文件及测试语料，不改主工作区：
 
