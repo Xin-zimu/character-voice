@@ -1,8 +1,10 @@
 """Server, prompt and retrieval regressions; uses only local sockets and stdlib."""
 import http.client
 import json
+import os
 import re
 import socket
+import subprocess
 import sys
 import time
 import tempfile
@@ -31,6 +33,9 @@ import check_persona
 #   BackendTests         —— 不碰字幕，任何机器都能跑
 #   CorpusTests(BackendTests) —— 依赖字幕，没有索引就只跳过这几个
 CORPUS_READY = (ROOT / 'data' / 'index' / 'docs.jsonl').exists()
+#: 建索引时**测试自己**也要串行：`server.load_corpus()` 的锁只保证「只存一份」，
+#: 保证不了「只建一次」——测试主线程与服务线程可能同时从 None 出发。
+_CORPUS_BUILD_LOCK = threading.Lock()
 NO_CORPUS_REASON = (
     '这条用例依赖字幕索引（语料未包含在本仓库中，版权原因）。'
     '请先自备 data/parsed/*.dialogue.jsonl，再运行 py build_corpus.py。'
@@ -190,10 +195,24 @@ class BackendTests(unittest.TestCase):
     # ------------------------------------------------------------------
     @classmethod
     def _need_corpus(cls):
+        """按需加载索引，**并且串行化**（2026-10-26 复现的第二次崩溃）。
+
+        `server.load_corpus()` 自己已经加锁了（test_03b 锁住），但那个锁只
+        保证「只构造一份」。它挡不住的是**同时**构造：`BackendTests.setUpClass`
+        起了一个 `ThreadingTCPServer`，测试主线程在这里构造 13070 条索引时，
+        服务线程可能正好在处理 `/api/preview` 请求、也来调 `load_corpus()`。
+        两边都从 `CORPUS is None` 出发，就变成**两个线程同时 build**：
+        锁保证最后只有一份被保存，却保证不了构造过程只发生一次。
+
+        实测：后端连跑 6 轮，1 轮在 `retriever.py::tokenize` 里解释器级崩溃
+        （`Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache`）。
+        修法是**先在这里建好**，让服务线程从来不需要自己构造。
+        """
         if not CORPUS_READY:
             raise unittest.SkipTest(NO_CORPUS_REASON)
         if not hasattr(cls, 'corpus') or cls.corpus is None:
-            cls.corpus = server.load_corpus()
+            with _CORPUS_BUILD_LOCK:
+                cls.corpus = server.load_corpus()
 
     def test_03_complete_corpus(self):
         self._need_corpus()
@@ -1323,6 +1342,132 @@ class BackendTests(unittest.TestCase):
                 f'{n} 条并发写入全部报成功，但文件里少了 {len(missing)} 条：'
                 f'{sorted(missing)}\n实际内容：{sorted(text_in_file)}')
 
+    def test_16d_memory_concurrent_processes_do_not_lose_records(self):
+        """**真的起多个进程**同时写同一个记忆文件，一条都不能丢（R-04，CHAT-016-A）。
+
+        为什么 test_16b 不够：它用线程，只压到第一层锁（进程内按路径共享）。
+        第二层是跨进程文件锁——POSIX 上 `fcntl.flock`、Windows 上 `msvcrt.locking`。
+        Linux 上 `fcntl` 一直存在，所以即使 Windows 那半完全没写，**测试在任何
+        平台都会绿**，而 Windows 上照样丢记录。这条用例对锁的实现不做任何模拟：
+        起真实子进程，谁在跑就在真实平台上用哪把锁。
+
+        实测（2026-10-26，Windows / CPython 3.13.2，6 进程 × 8 轮）：
+          - 保留文件锁：8/8 轮都是 6 条（复查增至 30+40 轮，0 异常）；
+          - 把两层文件锁都关掉：8/8 轮都丢，文件里剩 2～4 条。
+        所以下面关锁的那条变异（M87）会稳定报红，不是靠运气。
+
+        子进程在开跑前对齐同一时刻，把「读—改—写」的窗口叠在一起；
+        判据只看结果：每个进程都报成功，文件里就必须有 N 条。
+        """
+        ctx, root = self.memory_dir()
+        with ctx:
+            n = 6
+            child = root / 'concurrent_writer.py'
+            child.write_text(
+                "import os, sys, time\n"
+                "sys.path.insert(0, os.environ['YUKI_ROOT'])\n"
+                "import memory\n"
+                "start_at = float(os.environ['YUKI_START_AT'])\n"
+                "index = os.environ['YUKI_INDEX']\n"
+                "store = memory.MemoryStore(os.environ['YUKI_MEM_ROOT'], world='normal')\n"
+                "while time.time() < start_at:\n"
+                "    time.sleep(0.001)\n"
+                "rec, warns = store.add('跨进程第 ' + index + ' 条')\n"
+                "print(rec['id'], warns)\n",
+                encoding='utf-8')
+
+            start_at = time.time() + 1.5     # 留出 6 个解释器的启动时间
+            env = dict(os.environ, PYTHONUTF8='1', YUKI_ROOT=str(ROOT),
+                       YUKI_MEM_ROOT=str(root), YUKI_START_AT=str(start_at))
+            procs = []
+            for i in range(n):
+                e = dict(env, YUKI_INDEX=str(i))
+                procs.append(subprocess.Popen(
+                    [sys.executable, str(child)], env=e,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding='utf-8', errors='replace'))
+            outs = [p.communicate(timeout=120) for p in procs]
+            codes = [p.returncode for p in procs]
+            self.assertEqual(codes, [0] * n,
+                             f'子进程异常退出（锁竞争不该变成报错）：{[o[1] for o in outs]}')
+
+            final = json.loads((root / 'memory-normal.json').read_text(encoding='utf-8'))
+            texts = {r['text'] for r in final['records']}
+            expected = {f'跨进程第 {i} 条' for i in range(n)}
+            missing = expected - texts
+            self.assertFalse(
+                missing,
+                f'{n} 个进程都报成功，文件里却少了 {len(missing)} 条：{sorted(missing)}\n'
+                f'实际内容：{sorted(texts)}\n'
+                f'这是跨进程文件锁失效——线程用例（test_16b）看不见这一层。')
+
+    def test_16e_windows_lock_branch_locks_and_unlocks(self):
+        """模拟 `msvcrt` 分支：Windows 那条路必须真的锁、也必须真的解锁。
+
+        上一条证明「在本机能跑」，这条补另一个盲区：在**没有 Windows 的机器上**
+        也要能查出 Windows 那条分支写错。模拟只验证调用形状，不冒充平台证据：
+
+          - 锁文件必须至少有 1 字节（`msvcrt.locking` 锁的是文件里的字节）；
+          - 必须从 0 字节处锁 1 字节，用的是 `LK_LOCK`；
+          - 必须解锁同 1 字节，即使业务函数抛异常也要解锁——否则下一次写
+            会一直等到 10 秒超时才失败，等于把死锁换成偶发报错。
+        """
+        ctx, root = self.memory_dir()
+        with ctx:
+            import memory as memory_mod
+
+            calls = []
+
+            class FakeMsvcrt:
+                LK_LOCK, LK_UNLCK = 1, 2
+
+                def locking(self, fd, mode, nbytes):
+                    calls.append((mode, nbytes, os.lseek(fd, 0, os.SEEK_CUR)))
+
+            with patch.object(memory_mod, 'fcntl', None), \
+                 patch.object(memory_mod, 'msvcrt', FakeMsvcrt()):
+                store = memory_mod.MemoryStore(root, world='normal')
+                store.add('Windows 分支照常写入')
+                lock_path = root / '.memory-normal.lock'
+                self.assertTrue(lock_path.exists(), 'Windows 分支必须建锁文件')
+                self.assertGreaterEqual(lock_path.stat().st_size, 1,
+                                        'msvcrt.locking 需要至少 1 字节可以锁')
+                self.assertEqual([(m, nb, pos) for m, nb, pos in calls],
+                                 [(FakeMsvcrt.LK_LOCK, 1, 0),
+                                  (FakeMsvcrt.LK_UNLCK, 1, 0)],
+                                 f'锁/解锁的调用形状不对：{calls}')
+
+                # 业务函数抛错时也必须解锁。否则锁留在句柄上，
+                # Windows 下下一次写入会卡到 LK_LOCK 的 10 秒超时才失败。
+                calls.clear()
+
+                def boom(data):
+                    raise RuntimeError('模拟业务失败')
+                with self.assertRaises(RuntimeError):
+                    store._mutate(boom)
+                self.assertEqual([m for m, _, _ in calls],
+                                 [FakeMsvcrt.LK_LOCK, FakeMsvcrt.LK_UNLCK],
+                                 f'异常路径没有解锁：{calls}')
+
+    def test_16f_cross_process_lock_survives_nested_roots(self):
+        """跨进程锁的路径跟着**记忆文件**走，不跟着进程（R-04 的另一个面）。
+
+        服务端每个请求新建一个 MemoryStore；锁文件必须建在同一个目录下，
+        否则两个进程各锁各的文件，等于没锁。这条在两台机器上都能跑，
+        不依赖具体锁实现：同一 root 的两个 store 必须指向同一个锁路径。
+        """
+        ctx, root = self.memory_dir()
+        with ctx:
+            import memory as memory_mod
+            a = memory_mod.MemoryStore(root, world='normal')
+            b = memory_mod.MemoryStore(root, world='normal')
+            self.assertEqual(a.path, b.path)
+            self.assertEqual(root / '.memory-normal.lock',
+                             root / f'.memory-{a.world}.lock',
+                             '锁文件命名要与世界绑定')
+            # 两个世界不能共用同一把文件锁：否则换成崩溃世界会互相等。
+            self.assertNotEqual(f'.memory-{a.world}.lock', '.memory-crash.lock')
+
     def test_16c_memory_visible_backup_failure(self):
         """备份失败必须看得见，且不能覆盖掉唯一的好备份（R-06，V-MEM-04）。
 
@@ -1417,6 +1562,92 @@ class BackendTests(unittest.TestCase):
         self.assertNotEqual(a, block_for([{**user_manual[0],
                                           'source': {'kind': 'summary'}}]),
                             '来源不同，渲染必须不同')
+
+    def test_14h_oversized_memory_does_not_hide_the_rest(self):
+        """一条超长记忆不能把其余记忆全部挤掉（CHAT-016，2026-10-26 审计 T3）。
+
+        复现（修复前实测）：三条可用记忆里夹一条超长记录，`render_shared_memory()`
+        只输出第一条——第二条超预算时直接 `break`，第三条（"怕黑"，来源 summary）
+        根本没被看过。用户侧看到的是「明明存了记忆，她一条都不提」，
+        而且**没有任何警告**：这不是「模型没用上」，是渲染层在进入上下文之前
+        就把它们丢了。「检索到了」「放进上下文了」「模型用上了」是三个不同的事实，
+        V-MEM-06 需要分别验证；这条锁的是中间那个。
+
+        判据只管可观察的结果，不规定实现：
+          - 超长那条之后**仍然有效**的记忆必须出现；
+          - 相关性顺序、主体标注与来源标注不能因为这次改动丢失；
+          - 字符预算依然成立。
+        """
+        long_text = '一起看过一次黄昏' + '，很长的记录' * 200
+        records = [
+            {'id': 'm-a', 'world': 'normal', 'text': '你喜欢在活动室看书',
+             'subject': 'user', 'status': 'active', 'created': '2026-10-20T10:00:00',
+             'source': {'kind': 'user-stated'}},
+            {'id': 'm-long', 'world': 'normal', 'text': long_text,
+             'subject': 'together', 'status': 'active', 'created': '2026-10-21T10:00:00',
+             'source': {'kind': 'user-stated'}},
+            {'id': 'm-c', 'world': 'normal', 'text': '怕黑',
+             'subject': 'yuki', 'status': 'active', 'created': '2026-10-22T10:00:00',
+             'source': {'kind': 'summary'}},
+        ]
+        max_chars = 1200
+        out, meta = pb.render_shared_memory_with_meta(records, 'normal', max_chars=max_chars)
+
+        self.assertIn('你喜欢在活动室看书', out, f'第一条应当在：\n{out[:200]}')
+        self.assertIn('怕黑', out,
+                      f'超长那条之后的记忆被整条吞掉了 —— 这就是"多条记忆静默归零"。'
+                      f'实际输出：{out[:200]}')
+        # 来源标注不能被这次改动顺手丢掉：怕黑是摘要来的，必须标明。
+        self.assertIn('不准确', out, f'摘要来源的标注丢了：\n{out[:400]}')
+        # 主体标注同样保留。
+        self.assertIn('对方', out, '主体标注丢了')
+        self.assertIn('你：', out, '她自己的事要用她的视角写')
+
+        # 预算依然成立，而且**单条不能独占全部预算**：不然一条 5000 字的记录
+        # 会正好用掉全部额度，结果和"被整条吞掉"一样。
+        self.assertLessEqual(len(out), max_chars, f'预算被放开了：{len(out)} > {max_chars}')
+        self.assertEqual(meta['listed'], 3, f'三条都应当进上下文：{meta}')
+        self.assertEqual(meta['truncated'], 1, f'只有超长那条被截断：{meta}')
+        self.assertIn('后略', out, '被截断的记录要标出来，模型才知道它不完整')
+
+    def test_14i_memory_render_reports_what_the_budget_did(self):
+        """预算真的会满，那么"用掉了多少、丢了几条"必须能查出来（CHAT-016）。
+
+        上一条要求"超长项不能吞掉后面的"，但预算确实有限：塞不进就是塞不进。
+        这里锁的是**不许静默**：检索到几条、实际进上下文几条、其中几条被截断，
+        三个数要分开报。修复前这三个数一个都没有——调用方只能看到一块
+        "有内容"的提示词，分不清是没记忆还是没装进去。
+        """
+        records = [
+            {'id': f'm-{i}', 'world': 'normal', 'text': f'第 {i} 条记忆' + '，细节' * 120,
+             'subject': 'user', 'status': 'active', 'created': f'2026-10-{10 + i:02d}T10:00:00',
+             'source': {'kind': 'user-stated'}}
+            for i in range(8)
+        ]
+        out, meta = pb.render_shared_memory_with_meta(records, 'normal', max_chars=400)
+        self.assertTrue(out, '预算再小也应当至少输出一条')
+        self.assertLessEqual(len(out), 400, f'预算没生效：{len(out)}')
+        self.assertGreater(meta['truncated'], 0, f'预算挡掉了内容，却没有报告截断：{meta}')
+        self.assertEqual(meta['budget'], 400)
+        self.assertLessEqual(meta['listed'], 8)
+
+        # 预算小到连一条都放不下时，必须**明说丢了几条**，不能返回空串了事。
+        out2, meta2 = pb.render_shared_memory_with_meta(records, 'normal', max_chars=5)
+        self.assertEqual(out2, '', '放不下就该是空块')
+        self.assertEqual(meta2['skipped'], 8, f'整块被丢光时必须说出条数：{meta2}')
+
+        # 世界与状态过滤仍然生效：别的世界、非 active 的记录不该占预算。
+        mixed = records + [
+            {'id': 'm-x', 'world': 'crash', 'text': '另一世界的记忆',
+             'subject': 'user', 'status': 'active', 'created': '2026-10-20T10:00:00'},
+            {'id': 'm-y', 'world': 'normal', 'text': '已退下的记忆',
+             'subject': 'user', 'status': 'retired', 'created': '2026-10-20T10:00:00'},
+        ]
+        out3, meta3 = pb.render_shared_memory_with_meta(mixed, 'normal', max_chars=400)
+        self.assertNotIn('另一世界的记忆', out3, '另一世界的记忆不许出现')
+        self.assertNotIn('已退下的记忆', out3, '非 active 的记忆不许出现')
+        self.assertEqual(meta3['skipped'], meta['skipped'] + 0,
+                         f'被过滤掉的记录不该算进"因预算跳过"：{meta3}')
 
     def test_14g_memory_subject_and_source_reach_the_ui(self):
         """界面拿到的记录要带主体与来源（R-07）。"""

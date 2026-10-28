@@ -654,6 +654,39 @@ print(json.dumps([[t.is_art(x), t.check_art(x), t.text_width(x), t.art_blocks(x)
     assert(txt.includes('还没有回复'), '切到空世界后统计要跟着变，不能留上一个世界的数据');
     ok(true, '调试面板随世界切换，预览请求带当前世界');
 
+    // 5b) 共同经历要分三个数显示（T3，2026-10-26）：检索到几条 /
+    //     进上下文几条 / 其中几条被截断或跳过。
+    //     合成一个「N 条」时，「存了 6 条却一条都没进上下文」和
+    //     「没存过记忆」在面板上长得一样，用户只会以为她记不住。
+    dbg.state.fetchPreview = async (url, opts) => {
+      dbg.state.previewBodies.push(JSON.parse(opts.body));
+      return {ok: true, json: async () => ({system_prompt: '系统提示词内容', hits: [],
+        memory_count: 6, message_count: 2, world: 'normal',
+        memory_render: {listed: 3, skipped: 1, truncated: 2, chars: 900, budget: 1200}})};
+    };
+    dbg.els.get('#pf-body').children.length = 0;
+    await dbg.T.openPreflight();
+    await new Promise(setImmediate);
+    txt = pfText();
+    assert(txt.includes('检索到 6 条'), '要显示检索到几条：' + txt.slice(-400));
+    assert(txt.includes('进上下文 3 条'), '要显示实际进上下文几条');
+    assert(txt.includes('2 条超长已截断'), '截断条数要看得见');
+    assert(txt.includes('1 条因字符预算跳过'), '因预算跳过的条数要看得见');
+    // 没有截断/跳过时不画那两句，免得每次预览都挂着两行「0 条」。
+    dbg.state.fetchPreview = async (url, opts) => {
+      dbg.state.previewBodies.push(JSON.parse(opts.body));
+      return {ok: true, json: async () => ({system_prompt: 'x', hits: [],
+        memory_count: 2, message_count: 2, world: 'normal',
+        memory_render: {listed: 2, skipped: 0, truncated: 0, chars: 40, budget: 1200}})};
+    };
+    dbg.els.get('#pf-body').children.length = 0;
+    await dbg.T.openPreflight();
+    await new Promise(setImmediate);
+    txt = pfText();
+    assert(!txt.includes('已截断') && !txt.includes('因字符预算跳过'),
+      '没有截断或跳过时不该画出这两句：' + txt.slice(-300));
+    ok(true, '共同经历分「检索到 / 进上下文 / 截断 / 跳过」显示，零值不画（T3）');
+
     // 6) payload 里绝不能把 api_key 带进面板。
     dbg.T.setLastSent({at: 'x', payload: {world: 'normal', message: 'm', history: [],
       temperature: 0.85, max_tokens: 220, k: 5, model: 'm'}, world: 'normal', hits: 0, status: 200});

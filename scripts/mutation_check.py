@@ -610,11 +610,15 @@ def m_backup_failure_swallowed(src):
 
 
 def m_memory_subject_dropped(src):
-    """共同经历渲染时不再标主体 —— 分不清「你记得我」和「我记得你」（R-07 反向）。"""
-    marker = '        block = f"[{i}] {when} · {subject}：{r.get(\'text\', \'\')}{mark}"'
-    assert marker in src, '变异失效：render_shared_memory 里找不到带主体的那行'
-    return src.replace(
-        marker, '        block = f"[{i}] {when} · {r.get(\'text\', \'\')}"', 1)
+    """共同经历渲染时不再标主体 —— 分不清「你记得我」和「我记得你」（R-07 反向）。
+
+    锚点跟着 T3 的改动移到了 `head` 那一行（原来拼 `block` 的那行已经不存在）。
+    2026-10-26 全量变异时正是这里报「变异失效」——**这是好事**：
+    变异失效 ≠ 被拦住，脚本把它单独计数，没有混进「已拦住」。
+    """
+    marker = '        head = f"[{len(out) + 1}] {when} · {subject}："'
+    assert marker in src, '变异失效：render_shared_memory 里找不到带主体的 head'
+    return src.replace(marker, '        head = f"[{len(out) + 1}] {when} · "', 1)
 
 
 def m_scene_reply_not_consumed(src):
@@ -747,11 +751,187 @@ def m_seed_dead_rule_back(text):
     """把作废的「可执行硬约束」原样写回种子文件正文（AUD-11 反向）。
 
     变异的是**纯文本**，走的是源码替换那条分支（`mutate(str) -> str`）。
+
+    **AUD-11 证据链的断点（2026-10-26 审计）**：这个函数只让「有作废标记的行
+    不许出现」那半条判据变红，对「作废标记本身丢了」这半条毫无作用——
+    因为它是**插在**已有标记旁边，不是**去掉**标记。判据①②③里，
+    真正被它碰到的只有「没标作废的限制性句子」这一条。
+
+    所以锚点不只求"能替换成功"，还要**落在被保护的那一节里**：
+    上面`## 从这批种子直接读出的角色规则`是那句硬约束原来所在的位置。
+    把句子写回它自己那一节，才等于「规则回到了原来的地方」；
+    写进别的章节只是又出现了一遍同样的字，测试拦住的可能是别的原因。
     """
-    marker = '## 从这批种子直接读出的角色规则'
-    assert marker in text, '变异失效：找不到那一节'
-    dead = '\n\n**可执行的硬约束**：日常对话单句 ≤ 15 字；只有解释超自然现象时才允许长句，且必须零情绪词、零感叹号。\n'
-    return text.replace('\n---\n\n## 这份文件不再用于什么（AUD-11）', dead + '\n---\n\n## 这份文件不再用于什么（AUD-11）', 1)
+    section = text.find('## 从这批种子直接读出的角色规则')
+    assert section != -1, '变异失效：找不到「从这批种子直接读出的角色规则」这一节'
+    nxt = text.find('\n## ', section + 1)
+    assert nxt != -1, '变异失效：找不到下一节，无法确定这一节的边界'
+
+    # 锚点取**它原本所在的位置**：统计表最后一行之后、作废说明之前。
+    # 为什么不用「这一节的开头/结尾」：写在结尾等于写在「这条已作废」的
+    # 解释之后，读者先看到作废说明——那不是这条规则当初的处境，变异也就
+    # 弱化了。它当初就是在统计表下面，以可执行的口吻直接下达的。
+    table_end = text.find('| 情绪词 | **0 个** |')
+    assert table_end != -1, '变异失效：找不到统计表的最后一行'
+    assert section < table_end < nxt, '变异失效：统计表不在「角色规则」这一节里'
+    line_end = text.find('\n', table_end)
+    assert line_end != -1, '变异失效：统计表最后一行没有换行'
+    dead = ('\n**可执行的硬约束**：日常对话单句 ≤ 15 字；'
+            '只有解释超自然现象时才允许长句，且必须零情绪词、零感叹号。\n')
+    after = text[:line_end + 1] + dead + text[line_end + 1:]
+
+    # 变异必须真的落在这一节里，而且**排在同一条规则的作废说明之前**。
+    # 只查「这句话在文件里」不够：同一句在别处也有引用（「这份文件不再用于
+    # 什么」表格里就引了一次），那样 `in` 判据会通过，规则其实没回到正文。
+    pos = after.find(dead)
+    assert section < pos < nxt, '变异失效：写回的位置不在原来那一节里'
+    voided = after.find('~~**可执行的硬约束**')
+    assert voided != -1, '变异失效：找不到那条被划掉的旧硬约束（判据的对象没了）'
+    assert pos < voided, '变异失效：写回的位置在作废说明之后，等于没回到规则的位置'
+    assert ('~~' not in dead) and ('作废' not in dead), '变异失效：写回时必须去掉作废标记'
+    return after
+
+
+def m_seed_dead_rule_unvoided(text):
+    """把那条旧硬约束的**作废标记**抹掉，让它重新生效（AUD-11 反向）。
+
+    M50 反的是「规则被写回正文」，它碰的是「没标作废的限制性句子」那半条。
+    另一半——**作废标记本身丢了**——原来没有任何变异覆盖：把
+    `~~**可执行的硬约束**…~~` 的删除线去掉、再把下面那句「这条硬约束已作废」
+    改成中性描述，文件里就只剩一条以可执行口吻写着「单句 ≤ 15 字」的规则，
+    而 M50 一个字都不用动。
+
+    这正是审计指出的证据链断点：只证明「把规则抄回来会被拦住」，
+    没证明「把标记抹掉会被拦住」，而后者才是 AUD-11 真正落在文件上的形式。
+    """
+    start = text.find('~~**可执行的硬约束**')
+    assert start != -1, '变异失效：找不到被划掉的旧硬约束'
+    line_end = text.find('\n', start)
+    assert line_end != -1, '变异失效：那行没有结束'
+    line = text[start:line_end]
+    bare = line.replace('~~', '')
+    assert bare != line, '变异失效：那一行本来就没有删除线'
+    after = text[:start] + bare + text[line_end:]
+    # 下面那段「这条硬约束已作废，且与现有规则直接冲突」也要一起中性化，
+    # 否则读者仍能看出它作废了——变异就只改了半件事。
+    voided_note = '**这条硬约束已作废，且与现有规则直接冲突**'
+    assert voided_note in after, '变异失效：找不到作废说明那一行'
+    after = after.replace(voided_note, '**补充说明**', 1)
+    # 这一节里其余的「作废」字样一并抹掉，否则判据的死标记仍会放行整行。
+    # 只在这一节内替换，避免动到文件末尾那张「不再用于什么」的表（那是
+    # 另一条判据的对象，改了会让变异拦住的原因变得说不清）。
+    section = after.find('## 从这批种子直接读出的角色规则')
+    nxt = after.find('\n## ', section + 1)
+    assert section != -1 and nxt != -1, '变异失效：定位不到那一节的边界'
+    body = after[section:nxt]
+    cleaned = body.replace('整节降级为历史记录 · 不是规则', '这一节的结论')
+    cleaned = cleaned.replace('一条都不作为运行规则', '')
+    cleaned = cleaned.replace('已作废', '已确认')
+    cleaned = cleaned.replace('作废', '确定')
+    assert cleaned != body, '变异失效：这一节里没有可被抹掉的作废字样'
+    after = after[:section] + cleaned + after[nxt:]
+    assert after != text, '变异失效：变异没有改变文件内容'
+    return after
+
+
+def m_memory_render_breaks_on_overflow(src):
+    """退回「超预算就整块停」—— 超长记录又吞掉后面所有记忆（T3 反向）。
+
+    这是修复前的**原样实现**：没有单条封顶，遇到第一条装不下的直接 `break`。
+    它造成的不是「少了一条」，而是**这条之后的所有记忆都不进上下文**，
+    而且没有任何警告。三个事实——「检索到了」「放进上下文了」「模型用上了」
+    ——这一条管的是中间那个。
+    """
+    start_marker = '    out: list[str] = []\n    used = 0\n    for r in records:'
+    assert start_marker in src, '变异失效：找不到候选循环的开头'
+    body_start = src.index(start_marker)
+    body_end = src.index('    body = "\\n".join(out)', body_start)
+    legacy = (
+        '    out: list[str] = []\n'
+        '    used = 0\n'
+        '    for i, r in enumerate(records, 1):\n'
+        '        if r.get("world") != world:\n'
+        '            continue\n'
+        '        if r.get("status") not in (None, "active"):\n'
+        '            continue\n'
+        '        when = (r.get("created") or "")[:10]\n'
+        '        subject = SUBJECT_LABEL.get(str(r.get("subject") or "user").lower(), "对方")\n'
+        '        mark = SOURCE_MARK.get(_source_kind(r), "")\n'
+        '        block = f"[{i}] {when} · {subject}：{r.get(\'text\', \'\')}{mark}"\n'
+        '        if used + len(block) > max_chars:\n'
+        '            break\n'
+        '        out.append(block)\n'
+        '        used += len(block)\n'
+    )
+    return src[:body_start] + legacy + src[body_end:]
+
+
+def m_memory_render_ignores_budget(src):
+    """预算不再生效 —— 超长记录整条塞进提示词（T3 反向，另一个方向）。
+
+    修复「跳过超限项」时最容易顺手做过头：把预算判断去掉，什么都不丢，
+    但 system 会被一条记录撑爆。这一条证明预算仍是真的。
+    """
+    marker = 'def _fit_memory_entry('
+    assert marker in src, '变异失效：找不到 _fit_memory_entry'
+    idx = src.index(marker)
+    end = src.index('def render_shared_memory', idx)
+    body = src[idx:end]
+    assert 'budget' in body or 'max' in body, '变异失效：_fit_memory_entry 里没有预算参数'
+    return (src[:idx]
+            + 'def _fit_memory_entry(text, budget):\n'
+              '    # 变异：不再压缩、不再截断，原样返回（预算等于不存在）\n'
+              '    return text, False\n\n\n'
+            + src[end:])
+
+
+def m_cross_process_lock_removed(src):
+    """把跨进程文件锁整层去掉 —— 多进程并发写又静默丢记录（R-04 反向）。
+
+    与 M55 分工明确：M55 拆的是第 1 层（进程内、按路径共享），只证明
+    **线程**用例有效；这一条拆第 2 层，只有**真的起进程**的用例看得见。
+    Linux 上 `fcntl` 一直在，所以 Windows 那半条分支写错时，
+    原来的回归在任何平台都不会红——这就是审计说的「Linux 的 fcntl 掩盖了
+    Windows 锁失效」。
+
+    **两个分支都要关掉**。第一版只把 `if fcntl is not None:` 改成
+    `if False:`，而下面那条是 `elif msvcrt is not None:`——在 Windows 上
+    它照样执行，变异根本没生效，于是「未拦住」被读成了「测试有漏洞」。
+    实际是**变异写错了**：这正是本项目反复踩的那类坑（变异没生效 ≠ 没被拦住），
+    所以这里显式断言两个分支都不再进入。
+    """
+    posix = '                if fcntl is not None:'
+    win = '                elif msvcrt is not None:'
+    assert posix in src, '变异失效：_mutate 里找不到 POSIX 文件锁分支'
+    assert win in src, '变异失效：_mutate 里找不到 Windows 文件锁分支'
+    src = src.replace(posix, '                if False:  # 变异：POSIX 文件锁去掉', 1)
+    src = src.replace(win, '                elif False:  # 变异：Windows 文件锁去掉', 1)
+    assert 'if fcntl is not None:' not in src, '变异失效：POSIX 分支还在'
+    assert 'elif msvcrt is not None:' not in src, '变异失效：Windows 分支还在'
+    return src
+
+
+def m_windows_lock_never_unlocks(src):
+    """Windows 分支锁了不解 —— 下一次写入卡到超时（R-04 反向的另一种写法）。
+
+    这种错在 POSIX 机器上完全看不出来（那半根本不执行），在 Windows 上
+    表现为「偶尔要卡十秒然后失败」，很容易被当成磁盘慢。
+    """
+    marker = ('                        msvcrt.locking(lock_handle.fileno(), '
+              'msvcrt.LK_UNLCK, 1)')
+    assert marker in src, '变异失效：找不到 Windows 解锁那一行'
+    return src.replace(marker, '                        pass  # 变异：不解锁', 1)
+
+
+def m_windows_lock_no_seed_byte(src):
+    """Windows 分支不先写那 1 个字节 —— 空文件上锁不到任何东西。
+
+    `msvcrt.locking` 锁的是文件里的**字节**。空文件从 0 字节处锁 1 字节
+    会直接抛 OSError（permission denied），表现为「第一次写入就失败」。
+    """
+    marker = '                    if lock_handle.tell() == 0 and lock_path.stat().st_size == 0:'
+    assert marker in src, '变异失效：找不到写种子字节那一行'
+    return src.replace(marker, '                    if False:  # 变异：不写种子字节', 1)
 
 
 def m_frontend_combining_narrow(text):
@@ -1125,6 +1305,20 @@ MUTATIONS = [
      'scripts/art_behavior_probe.py', m_e6_plain_arm_keeps_art, 'artbehavior'),
     ('M83', '2026-10-26 反向：重算沿用存档旧统计，换判据也不重判',
      'scripts/art_behavior_probe.py', m_recount_trusts_stale_stats, 'artbehavior'),
+    # 2026-10-26 审计：T1 的证据链（AUD-11 有三半判据，原来只锁住了一半）
+    # 与 T3 的记忆渲染预算。
+    ('M84', 'AUD-11 反向：抹掉旧硬约束的删除线与「作废」字样，让它重新生效',
+     'data/seed_nagato_lines.md', m_seed_dead_rule_unvoided, 'backend'),
+    ('M85', 'T3 反向：超预算时退回直接 break，超长记录又吞掉后面所有记忆',
+     'prompt_builder.py', m_memory_render_breaks_on_overflow, 'backend'),
+    ('M86', 'T3 反向：超限项强行整条塞进去，字符预算不再生效', 'prompt_builder.py',
+     m_memory_render_ignores_budget, 'backend'),
+    ('M87', 'T2 反向：去掉第 2 层跨进程文件锁，只有真起进程的用例看得见',
+     'memory.py', m_cross_process_lock_removed, 'backend'),
+    ('M88', 'T2 反向：Windows 分支锁了不解锁（POSIX 上完全看不出来）',
+     'memory.py', m_windows_lock_never_unlocks, 'backend'),
+    ('M89', 'T2 反向：Windows 分支不写锁文件种子字节（空文件锁不住）',
+     'memory.py', m_windows_lock_no_seed_byte, 'backend'),
 ]
 
 
@@ -1285,6 +1479,12 @@ def run_mutations():
                 # 要被替换的文本，早先按 `.py` 判断，它掉进了人格卡那条分支，
                 # 于是 `load()` 去 personas/ 下找文件——报的是路径错误，
                 # 很容易被读成「文件不存在」，而其实是分支判断写窄了。
+                #
+                # 备份的字节必须与即将被改写的文件一致。`originals` 是**循环
+                # 开始时**读的，如果某个变异没有把文件还原干净，下一条变异
+                # 就是在「上一条留下的内容」上改——变异和证据都会错位。
+                assert target.read_bytes() == originals[fname], (
+                    f'变异 {mid} 开始前文件与备份不一致：上一条变异没有还原干净')
                 if is_text_source(fname):
                     before = target.read_text(encoding='utf-8')
                     after = mutate(before)

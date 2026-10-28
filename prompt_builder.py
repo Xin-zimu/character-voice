@@ -232,6 +232,94 @@ def _source_kind(record: dict) -> str:
     return ""
 
 
+#: 一条记忆最多占多少字符。超过就压到这么长再加省略号。
+#:
+#: 为什么必须有上限，而不是「装不下就跳过」：一条很长的记录往往是**真的**
+#: 有内容（用户手动写下一整段共同经历）。整条丢掉等于「她记得的最重要那件事
+#: 反而永远不出现」；整条塞进去又会把别的全挤掉。压缩是两者之间的那条路。
+MEMORY_ENTRY_MAX = 300
+
+#: 省略标记。**必须出现在给模型看的文本里**，不是只给用户看：
+#: 模型要能看出这条记录被截断了，才不会把半句话当成完整事实引用。
+MEMORY_TRUNCATION_MARK = "……（后略）"
+
+
+def _fit_memory_entry(text: str, budget: int) -> tuple[str, bool]:
+    """把一条记忆压进 `budget` 个字符。
+
+    返回 `(文本, 是否被截断)`。**不改变语义**：只截尾、不概括、不删句。
+    概括需要模型或启发式，两者都会引入「记录里没有的话」——那正是
+    CHAT-019 要管的事。宁可让后半段缺席，也不替用户改写。
+
+    `budget` 小到连标记都放不下时返回空串，由调用方跳过这一条。
+    """
+    if budget <= 0:
+        return "", bool(text)
+    if len(text) <= budget:
+        return text, False
+    room = budget - len(MEMORY_TRUNCATION_MARK)
+    if room <= 0:
+        return "", True
+    return text[:room] + MEMORY_TRUNCATION_MARK, True
+
+
+def render_shared_memory_with_meta(
+    records: list[dict], world: str, max_chars: int = 1200
+) -> tuple[str, dict]:
+    """排共同经历，同时报告**这一块是怎么用掉预算的**。
+
+    为什么要把元信息交出来（2026-10-26 审计 T3）：原来的实现只有一个字符串，
+    调用方没法知道「记忆存了 6 条，为什么上下文里一条都没有」。三种情况
+    （没检索到 / 检索到了但预算装不下 / 全装下了）在 system 里长得一样，
+    出问题时只能靠猜。
+
+    返回值第二个元素：
+      ```
+      {"listed": 装入条数, "skipped": 因预算整条跳过, "truncated": 被截断条数,
+       "chars": 实际字符数, "budget": 预算}
+      ```
+    """
+    meta = {"listed": 0, "skipped": 0, "truncated": 0, "chars": 0,
+            "budget": max_chars}
+    if not records:
+        return "", meta
+
+    out: list[str] = []
+    used = 0
+    for r in records:
+        if r.get("world") != world:
+            continue
+        if r.get("status") not in (None, "active"):
+            continue
+        when = (r.get("created") or "")[:10]
+        subject = SUBJECT_LABEL.get(str(r.get("subject") or "user").lower(), "对方")
+        mark = SOURCE_MARK.get(_source_kind(r), "")
+        head = f"[{len(out) + 1}] {when} · {subject}："
+        tail = mark
+        # 编号按**实际装入**的顺序排，不按输入下标：跳过的记录不该在
+        # 编号上留下空洞（[`[1]` `[3]`] 会让模型以为中间那条被省略了，
+        # 而它其实只是被预算挡掉，和上下文里的内容无关）。
+        room = max_chars - used - len(head) - len(tail) - 1   # -1 是换行
+        # **单条封顶**（MEMORY_ENTRY_MAX）。只按「剩余预算」压是不够的：
+        # 一条 5000 字的记录会正好用掉全部预算，后面的记忆照样一条都进不来，
+        # 只是从「被整条吞掉」变成「被一条压缩后的长记录吞掉」——用户看到的
+        # 结果一样。封顶之后，每条最多占 300 字，1200 的预算至少容得下四条。
+        cap = min(max(room, 0), MEMORY_ENTRY_MAX)
+        text, cut = _fit_memory_entry(str(r.get("text", "")), cap)
+        if not text:
+            meta["skipped"] += 1
+            continue
+        block = f"{head}{text}{tail}"
+        if cut:
+            meta["truncated"] += 1
+        out.append(block)
+        used += len(block) + 1          # +1 是换行
+    body = "\n".join(out)
+    meta["listed"] = len(out)
+    meta["chars"] = len(body)
+    return body, meta
+
+
 def render_shared_memory(records: list[dict], world: str, max_chars: int = 1200) -> str:
     """把共同经历排成给模型看的块（CHAT-016）。
 
@@ -245,24 +333,15 @@ def render_shared_memory(records: list[dict], world: str, max_chars: int = 1200)
     **每条都要带主体与来源**（R-07）：`[1] 2026-10-20 · 对方：不吃香菜`
     而不是 `[1] 2026-10-20 · 不吃香菜`。没有主体的记忆会让模型分不清
     「你记得我」和「我记得你」；来源是摘要时还要加一句「可能不准确」。
+
+    **超长记录不再吃掉其余记忆**（2026-10-26 审计 T3）：原实现遇到第一条
+    装不下的记录就 `break`，于是一条很长的记录之后的所有记忆——哪怕它们
+    只有十几个字——都进不了上下文，而且没有任何警告。实测三条记忆夹一条
+    超长记录，输出只剩第一条。现在改为：这条压到预算允许的长度（`_fit_memory_entry`），
+    压不下就跳过它、**继续看后面的**；相关性顺序不变，被截断的条数由
+    `render_shared_memory_with_meta()` 报告。
     """
-    if not records:
-        return ""
-    out, used = [], 0
-    for i, r in enumerate(records, 1):
-        if r.get("world") != world:
-            continue
-        if r.get("status") not in (None, "active"):
-            continue
-        when = (r.get("created") or "")[:10]
-        subject = SUBJECT_LABEL.get(str(r.get("subject") or "user").lower(), "对方")
-        mark = SOURCE_MARK.get(_source_kind(r), "")
-        block = f"[{i}] {when} · {subject}：{r.get('text', '')}{mark}"
-        if used + len(block) > max_chars:
-            break
-        out.append(block)
-        used += len(block)
-    return "\n".join(out)
+    return render_shared_memory_with_meta(records, world, max_chars)[0]
 
 
 def strip_prefix(text: str) -> str:

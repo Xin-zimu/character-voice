@@ -501,6 +501,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sys.stderr.write(f"[server] 检索不可用: {e}\n")
 
         memories = memory_read(user_text, world)
+        # 这块是怎么用掉预算的（T3）。原来只有字符串，于是「没检索到」
+        # 「检索到了但装不下」「全装下了」在 system 里长得一样，出问题时只能猜。
+        _, memory_meta = pb.render_shared_memory_with_meta(memories or [], world)
         # 状态块与状态快照一次算出来，保证「显示的」和「注入的」是同一份。
         scene_block, scene_snapshot = scene_turn(user_text, world,
                                                  commit=commit_scene)
@@ -522,6 +525,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "world": world,
             "kind": "chat" if art_allowed else "plain",
             "memory_count": len(memories),
+            # 记忆块的预算使用情况（T3）。三个数分开报：检索到几条、
+            # 实际进上下文几条、其中几条被截断。界面据此区分「没有记忆」
+            # 与「有记忆但没进上下文」——这两种原来在面板上一个样。
+            "memory_render": memory_meta,
             # 预览时给的是**试算后**的状态，和 system 里那一块保持一致；
             # 读全局状态会让「面板显示的」和「实际注入的」对不上。
             "scene_state": scene_snapshot,

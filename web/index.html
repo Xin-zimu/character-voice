@@ -1771,8 +1771,17 @@
 
       const hits = document.createElement("div");
       hits.className = "hits";
+      // 共同经历这里分三个数，别合成一个「N 条」（T3，2026-10-26）：
+      // 检索到 N 条 / 实际进上下文 M 条 / 其中 K 条被截断。
+      // 合成一个数时，「存了 6 条却一条都没进上下文」和「没存过记忆」长得一样，
+      // 用户只会以为她记不住——真正的原因在渲染层，不在模型。
+      const mr = d.memory_render || {};
+      const memLine = `共同经历：检索到 ${d.memory_count || 0} 条，进上下文 ` +
+        `${mr.listed || 0} 条` +
+        ((mr.truncated || 0) > 0 ? `（${mr.truncated} 条超长已截断）` : "") +
+        ((mr.skipped || 0) > 0 ? `（${mr.skipped} 条因字符预算跳过）` : "");
       hits.innerHTML = `<div class="t">会注入的原作记录（${d.hits.length} 条 · ` +
-        `共同经历 ${d.memory_count || 0} 条 · 共 ${d.message_count} 条消息）</div>`;
+        `${escapeHtml(memLine)} · 共 ${d.message_count} 条消息）</div>`;
       d.hits.forEach((h, i) => {
         const d2 = document.createElement("div");
         d2.className = "hit";
