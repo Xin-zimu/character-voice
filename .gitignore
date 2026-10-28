@@ -18,6 +18,26 @@ data/scenes/
 # L2 人工标注是本机工作产物，按需自行管理
 data/labeled/
 
+# 长门台词库与评测产物：**同样含字幕原文，同样不入库**
+#
+# 台词库 data/nagato_lines.jsonl 是从字幕逐条摘出来的逐字衍生物
+# （172 条，每条 text 与原句一字不差，test_03 就在钉这一点）。
+# 它的性质等同 data/parsed/，不能因为「只有 172 条」就当成普通数据。
+#
+# data/retrieval_eval/ 同理且更严重：precision_review/ 下的复核表
+# 带完整上下文窗口，实测逐字命中原句 1613 条——比台词库本身大一个量级。
+# 报告类文档（docs/P0_*.md 等）只引少量例句，可以入库；复核表不行。
+data/nagato_lines.jsonl
+data/nagato_lines_report.json
+data/retrieval_eval/
+
+# P0-4 交付包与本轮语料筛选工作区：全部是字幕衍生物或中间产物
+语料筛选/
+
+# 手工整理的临时/备份文件
+*.bak
+_reorg_backup*
+
 # 共同经历记忆：这是使用者的私人内容（谁和谁之间发生过什么），
 # 和语料一样不进公开仓库。目录本身保留（含说明），只忽略数据与备份。
 # 换机器时要单独拷 data/memory/，否则「她」会忘掉你们之间的事。

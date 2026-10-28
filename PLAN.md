@@ -62,7 +62,7 @@
 | 项 | 实测值 |
 |---|---|
 | 原作语料 | 13070 条 / 29 个片源，`data/index/docs.jsonl` 全量保留 |
-| 世界标注 | normal 11496 / crash 1574；《消失》切点 `0:38:13`（`movie_cut_sec` 2293.79） |
+| 世界标注 | normal **11542** / crash **1528**；crash 区间 `0:38:13`（`movie_cut_sec` 2293.79）→ `2:33:01`（`movie_restore_sec` 9181.96，口径 `objective_world`）；`2:33:01`–`2:33:21` 的 6 条带 `transition` 标记，`2:33:26` 为角色确认句（`movie_confirm`，不参与归属判定）。沿革：11496/1574 无恢复点 → 11536/1534（P0-3，锚 `2:33:26`）→ 11542/1528（P0-4，锚 `2:33:01`） |
 | 人格自检 | `py scripts/check_persona.py` → 0 错误；示例长度 主线 2–60 字（中位 9）、崩溃 4–54 字（中位 18） |
 | 前端回归 | `node scripts/test_frontend.js` → 39 项通过 |
 | 后端回归 | `py scripts/test_backend.py` → 9 项通过 |

@@ -215,11 +215,41 @@ class BackendTests(unittest.TestCase):
                 cls.corpus = server.load_corpus()
 
     def test_03_complete_corpus(self):
+        """语料全量保留，且世界归属满足不变量。
+
+        **这条断言在 2026-10-29 被显式改写**（AGENTS.md §四.2）。
+
+        原来钉的是 `crash == 1574`，那是「《消失》切点之后一律 crash」
+        这个旧口径的产物。P0-4 补上了**世界恢复点**（2:33:01「我健康地
+        出院了」），切点之后还有一个回到主线的区间，于是 crash 变成 1528。
+        差的 46 条不是丢了，是从 crash 归回了 normal —— 世界归属更准了。
+
+        为什么不是简单改个数字：硬的 1574 只能证明「跟上次一样」，证明不了
+        「归属是对的」。所以改成三类断言：
+          1. 总量与 id 唯一性（不会被重建改掉）
+          2. 两世界之和 == 总量（**没有一条漏标或重复归类**）
+          3. 恢复点存在且记录数正确（P0-4 的核心行为，缺失会立刻变红）
+        """
         self._need_corpus()
         self.assertEqual(self.corpus.size, 13070)
         self.assertEqual(len(self.corpus.episodes), 29)
-        self.assertEqual(sum(d['world'] == 'crash' for d in self.corpus.docs), 1574)
         self.assertEqual(len({d['id'] for d in self.corpus.docs}), 13070)
+
+        n_normal = sum(d['world'] == 'normal' for d in self.corpus.docs)
+        n_crash = sum(d['world'] == 'crash' for d in self.corpus.docs)
+        # 不变量：两世界互斥且穷尽，和恒等于总量。
+        self.assertEqual(n_normal + n_crash, 13070,
+                         f"世界归属不完整：normal={n_normal} crash={n_crash}")
+        # P0-4 口径的具体值。改这个数必须同时改 build_corpus 的世界规则，
+        # 并且说清楚是哪一段归属变了。
+        self.assertEqual(n_crash, 1528,
+                         f"crash 段应为 1528（P0-4 世界恢复点），实际 {n_crash}")
+
+        meta = json.loads((server.INDEX / 'meta.json').read_text(encoding='utf-8'))
+        self.assertEqual(meta.get('movie_restore'), '2:33:01',
+                         "缺少 P0-4 世界恢复点；索引可能是旧口径重建的")
+        self.assertEqual(meta.get('movie_restore_basis'), 'objective_world',
+                         "恢复点的口径必须写明是客观世界，不是角色认知")
 
     def test_03b_corpus_load_is_locked(self):
         """`load_corpus()` 必须只构造**一份**索引（2026-10-26 复现的竞态）。

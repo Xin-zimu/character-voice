@@ -28,12 +28,28 @@ from pathlib import Path
 # 中文常用虚词: 不切 2-gram, 也参与停用
 _STOP = set("的了是我你他她它们在有和就都而及与着或一个不没很也这那吗呢吧啊呀哦嘛")
 
+# 否定 / 反义字。查询侧要留住它们的语义（Q-02）：
+#   「不知道」被剥成「知道」、「不需要」被剥成「需要」，是语义反转。
+#   语料里她的标志性回答正是「不需要」（消失@0:25:56）。
+_NEG = set("不没未无非别否莫勿")
+
 _CN = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]+")
 _EN = re.compile(r"[a-z0-9]+")
 
 
 def tokenize(text: str) -> list[str]:
-    """中日文按 2-gram 切, 拉丁词整体保留。"""
+    """中日文按 2-gram 切, 拉丁词整体保留。
+
+    **这是建索引用的分词，规则不要改。**
+
+    它同时决定 BM25 的词表、df、IDF 和文档长度。任何对它的改动都会
+    让全库 IDF 重算、所有文档分数整体漂移，从而改变排序 —— 实测把
+    「不确定」保留成「不确」+「确定」这种替换式改法，会让首条查询的
+    正确答案从 7.838 分掉到 6.011 分、main Recall 从 73.0% 崩到 4.0%。
+
+    查询侧需要的增量（否定信号、短句兜底）放在 `tokenize_query()` 里，
+    只影响查询，不动索引。
+    """
     text = text.lower()
     toks: list[str] = []
     for m in _EN.finditer(text):
@@ -49,6 +65,110 @@ def tokenize(text: str) -> list[str]:
         else:
             toks.extend(s[i: i + 2] for i in range(len(s) - 1))
     return toks
+
+
+def tokenize_query(text: str) -> list[str]:
+    """查询侧分词：在 `tokenize()` 的结果上**追加**两类信号。
+
+    与 `tokenize()` 分开的原因是分工不同：
+      - `tokenize()` 定索引，改它 = 改全库 IDF = 改排序；
+      - 这个函数只作用于用户这句话，不影响任何文档的分数尺度。
+
+    追加的两类信号：
+
+    1. **否定双字**（Q-02）。`不知道` 在 `tokenize()` 里只剩 `知道`，
+       于是「不知道」和「知道」会得到完全相同的检索结果。这里额外追加
+       `不知`，两者即可区分。只在否定字**紧挨实词**时追加；孤立否定字
+       （「在不在」里的 `不`）没有区分力，不加。
+
+    2. **整段虚词的短句兜底**（Q-01）。`在吗`/`是的`/`那个` 经
+       `tokenize()` 后为空，检索会静默跳过。这里退回用原串，
+       让检索真的跑起来。原串 token 的 IDF 很高、只在原句出现过时
+       才命中，所以不会把短句硬凑出无关片段。
+       **单个虚词不退**（`的`/`了`）—— 那本来就不该检索。
+
+    纯标点 / 空白仍返回 `[]`。
+    """
+    text = text.lower()
+    toks = tokenize(text)
+
+    for m in _CN.finditer(text):
+        raw = m.group()
+        if not any(ch not in _STOP for ch in raw):
+            # 整段全是虚词。与 `tokenize()` 的做法保持一致：
+            # 长度 >=2 退原串，单字不退。
+            if len(raw) >= 2:
+                toks.append(raw)
+            continue
+        for i, ch in enumerate(raw):
+            if ch not in _NEG:
+                continue
+            if i > 0 and raw[i - 1] not in _STOP:
+                toks.append(raw[i - 1: i + 1])   # 前字 + 否定字：不确 / 没说
+            if i + 1 < len(raw) and raw[i + 1] not in _STOP:
+                toks.append(raw[i: i + 2])       # 否定字 + 后字：不知 / 不需
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+# 检索结果状态。修复前「切不出 token」和「语料里没有」都只是返回 []，
+# 调用方与评测都无法区分，导致把分词失败记成「正确的空召回」。
+STATUS_OK = "ok"                    # 有命中
+STATUS_NO_TOKENS = "no_tokens"      # 切不出 token —— 检索没有启动
+STATUS_NO_MATCH = "no_match"        # 检索跑了，但没有够格的记录
+
+
+class SearchResult:
+    """`Corpus.search_detailed()` 的返回值。
+
+    保留 `hits` 让调用方可以直接替换 `search()`；
+    额外带 `status` / `tokens` / `query` 便于分辨「为什么没结果」。
+    """
+
+    __slots__ = ("hits", "status", "tokens", "query")
+
+    def __init__(self, hits: list[dict], status: str,
+                 tokens: list[str], query: str):
+        self.hits = hits
+        self.status = status
+        self.tokens = tokens
+        self.query = query
+
+    def __bool__(self) -> bool:
+        """`if result:` 等价于「有命中」。"""
+        return bool(self.hits)
+
+    def __len__(self) -> int:
+        return len(self.hits)
+
+    def __iter__(self):
+        return iter(self.hits)
+
+    def __repr__(self) -> str:
+        return (f"SearchResult(status={self.status!r}, n={len(self.hits)}, "
+                f"query={self.query!r})")
+
+
+def search_detailed(corpus, world: str, query: str, k: int = 6,
+                    min_score: float = 5.0) -> SearchResult:
+    """模块级快捷方式。
+
+    `corpus` 为 None 时只做分词判断、不加载索引 —— 用于不依赖语料库的
+    契约测试，也方便调用方先确认「这条查询能不能进检索」再决定是否加载。
+    """
+    if corpus is None:
+        query = query or ""
+        toks = tokenize_query(query)
+        if not toks:
+            return SearchResult([], STATUS_NO_TOKENS, [], query)
+        return SearchResult([], STATUS_NO_MATCH, toks, query)
+    return corpus.search_detailed(world, query, k, min_score)
 
 
 class BM25:
@@ -115,7 +235,7 @@ class Corpus:
     # ------------------------------------------------------------------
     def search(self, world: str, query: str, k: int = 6,
                min_score: float = 5.0) -> list[dict]:
-        """世界感知检索。
+        """世界感知检索。返回命中列表（旧签名，主线依赖，保持不变）。
 
         world: "normal" | "crash"
         返回 [{id, ep, ep_title, start, world, text, ctx, anchor, score}]
@@ -130,14 +250,38 @@ class Corpus:
         实测分数分布：真实依据 6–65，噪声 3–5。取 5.0 作绝对下限。
         「早上好」「好久不见」这类寒暄仍会命中（18 / 15 分），
         因为它们在原文里是别人的招呼语 —— 这靠提示词处理，不靠分数。
+
+        需要区分「为什么没结果」时用 `search_detailed()`。
         """
-        toks = tokenize(query)
+        # 必须返回真正的 list：调用方会做切片、len、索引，
+        # 不能返回 SearchResult 这种"像 list 但不是 list"的对象。
+        return self.search_detailed(world, query, k, min_score).hits
+
+    def search_detailed(self, world: str, query: str, k: int = 6,
+                        min_score: float = 5.0,
+                        corpus=None) -> "SearchResult":
+        """同 `search()`，但把「为什么没结果」也返回。
+
+        三种状态（Q-01 的配套修复）：
+
+          STATUS_OK         有命中
+          STATUS_NO_TOKENS  查询切不出任何 token —— **检索没有启动**
+          STATUS_NO_MATCH   检索跑了，但语料里确实没有够格的记录
+
+        修复前这两种情况都只是 `return []`，调用方无法分辨，
+        评测把「分词失败」记成了「正确的空召回」（假通过）。
+        现在寒暄/虚词输入会落到 no_match 或 ok，而真正的切词失败
+        才会是 no_tokens —— 不再「所有短句一律强制召回」。
+        """
+        query = query or ""
+        toks = tokenize_query(query)
         if not toks:
-            return []
+            return SearchResult([], STATUS_NO_TOKENS, [], query)
         raw = self.bm25.search(toks, limit=160)
         if not raw:
-            return []
+            return SearchResult([], STATUS_NO_MATCH, toks, query)
         top = raw[0][1] or 1.0
+
 
         out = []
         seen_near: list[tuple[str, int]] = []
@@ -195,7 +339,7 @@ class Corpus:
             })
             if len(out) >= k:
                 break
-        return out
+        return SearchResult(out, STATUS_OK if out else STATUS_NO_MATCH, toks, query)
 
     # ------------------------------------------------------------------
     def episode(self, ep: str, start_idx: int = 0, limit: int = 200) -> dict:
